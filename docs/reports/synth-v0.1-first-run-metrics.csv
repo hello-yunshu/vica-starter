@@ -1,0 +1,7 @@
+system_id,difficulty,instances,valid,success_rate,mean_score,mean_solve_ms,p50_solve_ms,p95_solve_ms,mean_verify_us,total_cost_usd,mean_cost_per_instance,cost_per_valid_solution,valid_solutions_per_dollar,valid_solutions_per_second,mean_attempts,tokens_in,tokens_out
+synth-brute,1,5,5,1.0,1.0,0.21,0.14,0.7,26.8,0.0,0.0,0.0,0.0,4778.5934,0.0,0,0
+synth-brute,2,5,5,1.0,1.0,37.9,0.19,120.39,51.8,0.0,0.0,0.0,0.0,26.3832,0.0,0,0
+synth-brute,3,5,3,0.6,0.6,26.6,0.2,131.81,28.2,0.0,0.0,0.0,0.0,22.5576,0.0,0,0
+synth-random,1,5,4,0.8,0.8,0.97,0.64,2.76,28.0,0.0,0.0,0.0,0.0,826.7167,203.6,0,0
+synth-random,2,5,1,0.2,0.2,1.85,2.05,2.23,15.2,0.0,0.0,0.0,0.0,108.1744,442.6,0,0
+synth-random,3,5,1,0.2,0.2,2.41,2.9,3.01,11.2,0.0,0.0,0.0,0.0,82.9362,412.0,0,0
