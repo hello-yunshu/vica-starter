@@ -35,8 +35,9 @@
 score(candidate) = - Σ_j T_j
 ```
 
-`1||ΣT_j` 是 NP-hard，但存在伪多项式 DP 精确解 —— 既满足"连续 score"的研究价值，
-又能提供传统精确 baseline 作参照。
+`1||ΣT_j` 是 NP-hard；理论上存在伪多项式 DP 精确解，但当前源码的精确 baseline 用的是
+位掩码 O(n·2^n) Held-Karp 式 DP（见下方 §7 算法说明）。该任务兼具"连续 score"的研究
+价值，又能提供传统精确 baseline 作参照。
 
 ---
 
@@ -117,16 +118,21 @@ candidate -> schema check -> permutation check -> 累计完成时间 -> 迟到 -
 |------|------|
 | `opt-random` | 随机排列（floor baseline） |
 | `opt-edd` | 按截止期限升序贪心（传统启发式，对 `Lmax` 最优但对 `ΣT` 非最优） |
-| `opt-brute` | 穷举所有排列取最优（n 小时精确，n 大超时） |
-| `opt-dp` | 伪多项式 DP 精确解（O(n·P)，P=Σp，n≤14 时极快） |
+| `opt-brute` | 穷举所有排列取最优（n 小时精确，n 大时超时） |
+| `opt-dp` | 位掩码（Held-Karp 式）DP 精确解，O(n·2^n)，n≤~20 可行 |
 
-DP 依据定理：`1||ΣT_j` 存在按 EDD 顺序排列的最优调度，故在 EDD 顺序下做背包式 DP：
-
-```text
-按 d 升序排序任务；dp[s] = 累计处理时间恰为 s 的最小 ΣT
-对每个任务 k：dp[s] = min(dp[s], dp[s - p_k] + max(0, s - d_k))
-答案 = min_s dp[s]
-```
+> **算法说明（与源码一致）**：`opt-dp`（`systems/opt/dp.py`）实现的是位掩码
+> Held-Karp 式精确 DP——对每个已用子集 mask 记录最小 ΣT：
+>
+> ```text
+> dp[mask] = min over j in mask of dp[mask ^ (1<<j)] + max(0, time[mask] - d_j)
+> time[mask]  = mask 内任务处理时间之和（该子集最后任务的完成时间）
+> 答案       = dp[全量 mask]
+> ```
+>
+> 复杂度为 **O(n · 2^n)**，不是伪多项式 O(n·P)。`1||ΣT_j` 存在"按时完工任务按 EDD
+> 排序"的最优调度（Lawler 精确算法的理论依据），但当前源码**未**采用该 EDD 顺序上的
+> 背包式伪多项式 DP；代码与 brute 在小规模（n≤12)上逐例一致，作为可信精确基准。
 
 ---
 
@@ -161,7 +167,7 @@ DP 依据定理：`1||ΣT_j` 存在按 EDD 顺序排列的最优调度，故在 
 - [x] verifier 对 (challenge, candidate) 完全确定
 - [x] malformed candidate 不 crash
 - [x] 4 个 baselines 可运行并通过统一 verifier
-- [ ] 至少 1000 实例实验 + 报告
+- [x] 至少 1000 实例实验 + 报告（见 `opt-v0.1-scale.md`）
 - [x] pytest 全绿
 
 ---

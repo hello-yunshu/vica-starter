@@ -231,25 +231,29 @@ docs/reports/csp-v0.1-first-run.md
 
 Program Synthesis 的最高安全优先级任务。
 
-要求：
+要求（状态如实校准，见 `docs/SPEC.md` §14）：
 
-- [x] network disabled
-- [x] read-only minimal filesystem
 - [x] CPU time limit
 - [x] wall time limit
-- [x] memory limit
 - [x] process limit
-- [x] output limit
-- [x] syscall restriction / container isolation
-- [x] cleanup after execution
-- [x] malicious candidate tests
+- [x] fd / core / file-size limit
+- [x] cleanup after execution（进程组 kill 清理 fork 出的孙进程）
+- [x] 最小 allowlist 环境（不继承宿主 secrets）
+- [~] memory limit — 仅 Linux 生效（RLIMIT_AS/DATA）；macOS 上 fork 子进程继承
+      约 400GiB 虚拟足迹，macOS 内存隔离交由未来容器 / sandbox-exec 后端
+- [x] output limit — bounded streaming read（`select`）结合输出字节预算，超限立即
+      SIGKILL 整个进程组；真实硬性资源限制，非事后截断（`SANDBOX_ERROR`）
+- [ ] network disabled — 仅 Linux + root 的 `unshare(CLONE_NEWNET)`，默认关闭；
+      非 root / macOS 跳过并告警
+- [~] read-only minimal filesystem — 仅 Linux + root 的 chroot，默认关闭
+- [ ] syscall restriction / container isolation — 未实现（非受限容器后端）
 
 实现：`src/vica/sandbox/`（`run_sandboxed` + `SandboxLimits`），
 `tests/test_sandbox.py`。
 
 跨平台说明（macOS 开发机 + Linux CI）：
 
-- CPU / wall / output / fd / core / process 限制在所有平台生效。
+- CPU / wall / output(硬性流式) / fd / core / process 限制在所有平台生效。
 - 内存限制（RLIMIT_AS/DATA）仅 Linux 生效：macOS 上 fork 子进程继承约
   400GiB 虚拟数据足迹，有限 AS/DATA 会让 exec 在候选运行前中止；macOS 内存
   隔离交由未来的容器 / sandbox-exec 后端。
@@ -266,8 +270,9 @@ exec(candidate)
 直接运行于 Arena 主进程。
 
 > **注**：SYNTH-v0.1 使用纯 DSL 解释器（无 `exec`、无网络、无文件系统访问），
-> 解释器级沙箱守卫已在 M10 中实现并通过测试。M9 的 OS 级沙箱要求面向未来
-> 支持任意语言代码执行的 Challenge Family。
+> 解释器级沙箱守卫已在 M10 中实现并通过测试。M9 的 OS 级沙箱是**实验性 OS
+> 资源隔离原型**，目前不构成已硬化的恶意代码隔离边界；其网络/文件系统/内存/
+> syscall 项未可靠完成，故保持 `[ ]` / `[~]`，不标 `[x]`。
 
 ---
 
@@ -299,11 +304,15 @@ exec(candidate)
 
 ### Verifier
 
-- [x] deterministic hidden test regeneration (from seed + difficulty)
+- [x] deterministic hidden test regeneration: `HMAC-SHA256(verifier_secret,
+      type:version:hidden:seed:difficulty)`——固定 secret 完全确定，不同 secret 不同；
+      仅公开 (seed, difficulty) 无法重建
 - [x] candidate schema check
 - [x] parse / eval error mapping to ErrorCode
 - [x] sandbox limit mapping to ErrorCode.SANDBOX_ERROR
 - [x] malformed input never crashes verifier
+- [x] hidden material 隔离：solver 只拿 public challenge，拿不到
+      verifier secret / hidden tests / target program（见下方 SYNTH DoD）
 
 ### Registry & Runner Integration
 
@@ -337,6 +346,19 @@ exec(candidate)
 - [x] experiment `exp-baf77c8aa95d`: d1-3, 5 instances, 2 systems
 - [x] difficulty discrimination verified (brute 100%→60%, random 80%→20%)
 - [x] design doc Risk 1 validated (brute-forceable d1-2, partial d3)
+
+### SYNTH DoD — hidden-material integrity（Research Integrity & Stabilization Freeze）
+
+- [x] verifier-only hidden material 不能从 solver-visible challenge 数据单独推导
+      （`test_public_seed_alone_cannot_reconstruct_hidden_tests`）
+- [x] solver 收到的对象不含 reference solution / hidden tests / verifier secret
+      （`test_solver_challenge_dict_has_no_secret_or_hidden_material`、
+      `test_payload_contains_no_target_or_hidden_tests`）
+- [x] adversarial leakage test：公开自检通过但权威 verifier（带 secret）拒绝的
+      overfit candidate（`test_authoritative_verifier_rejects_when_solver_selfcheck_accepts`）
+- [x] 同 secret + 同 challenge => 相同 hidden material；不同 secret => 不同
+      （`test_hidden_tests_regenerate_identically`、
+      `test_different_verifier_secret_yields_different_hidden_tests`）
 
 
 ---

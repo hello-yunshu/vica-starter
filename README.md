@@ -1,124 +1,146 @@
+English | [简体中文](README.zh-CN.md)
+
 # VICA
 
-**Verifiable Intelligence Compute Arena**  
-可验证智能计算竞技场
+**Verifiable Intelligence Compute Arena** · 可验证智能计算竞技场
 
-VICA 是一个让 AI 模型、Agent、传统算法和混合计算系统，在自动生成、客观可验证的复杂任务上竞争问题解决效率的开放实验平台。
+A local research arena for measuring how different compute systems — LLMs, coding
+agents, traditional algorithms, and hybrid systems — perform on automatically
+generated, objectively verifiable tasks.
 
-## 核心目标
+VICA is not a hosted service. It is a **Local Research Arena**: you generate
+challenges, run solvers locally, and evaluate them with a deterministic verifier.
 
-VICA 研究的不是“哪个模型最会聊天”，而是：
+---
 
-> 在未知任务、有限时间和有限预算下，哪个计算系统能以更低成本产生更多经过确定性验证的高质量解？
+## Core Question
 
-核心关注：
+VICA studies not "which model chats best", but:
 
-- Hard to Solve, Easy to Verify
-- Difficulty 可调
-- Challenge 可无限生成
-- Verifier 确定性、低成本
-- 模型 / 算法 / Agent 中立
-- 统一测量成本、延迟、成功率和解质量
+> Under unknown tasks, limited time, and limited budget, which compute system
+> produces the most deterministically-verified high-quality solutions at the
+> lowest cost?
 
-## 当前阶段
+Design principles:
 
-当前只做实验平台，不做：
+- **Hard to solve, easy to verify** — compute is the cost; verification is cheap.
+- Difficulty is configurable; challenges are generated on demand and unbounded.
+- The verifier is deterministic and solver-neutral — **no LLM judge**.
+- Models, algorithms, and agents share one solver interface and one verifier.
+- Cost, latency, success rate, and solution quality are measured uniformly.
 
-- 区块链
-- Token
-- 钱包
-- 共识
-- 金融激励
-- P2P 网络
+---
 
-当前核心资产只有三个：
+## Current Status
 
-1. Challenge
-2. Verifier
-3. Benchmark Data
+VICA is a local research arena. The following components exist today:
 
-## 当前进展
+| Component | Status | Purpose |
+|-----------|--------|---------|
+| Protocol Core | Stable | Pydantic models, canonical serialization, interfaces |
+| CSP-v0.1 | Stable | Infrastructure validation (constraint satisfaction) |
+| Random baseline | Stable | Floor baseline |
+| Z3 baseline | Stable | Traditional solver baseline |
+| Arena runner | Stable | Challenge generation → solve → verify → record |
+| SQLite storage | Stable | Experiments, challenges, systems, runs |
+| Export / metrics | Stable | CSV / JSON export, aggregate metrics |
+| LLM adapter | Under Review | OpenAI-compatible API path (pricing optional) |
+| SYNTH-v0.1 | Experimental | Program-synthesis research (restricted DSL) |
+| OPT-v0.1 | Experimental | Continuous solution quality (scheduling) |
+| OS sandbox | Experimental | OS resource isolation prototype (see Security) |
 
-已完成（v0.1.0）：
+"Experimental / Under Review" reflects research maturity, not just code presence.
+`src/vica/server/` is intentionally empty — Public API / hosted arena are deferred
+(see below).
 
-- CSV/JSON 导出、指标报表、鉴权默认关闭 —— 已实现
+---
 
-## 首个里程碑
+## Security
 
-完成 `CSP-v0.1`：
+- SYNTH-v0.1 executes a **restricted DSL interpreter**. It does **not** execute
+  arbitrary Python candidate code (no `exec`, no `eval`).
+- The OS-level sandbox (`src/vica/sandbox/`) is an **experimental OS resource
+  isolation prototype** and MUST NOT currently be treated as a hardened
+  hostile-code isolation boundary. Memory limits are Linux-only; network
+  namespace / chroot are Linux+root and off by default; the output cap is a
+  bounded streaming read that kills the child on overflow (hard enforcement),
+  not post-hoc truncation.
+- Sandboxed subprocesses inherit a **minimal allowlist environment** — host
+  secrets (API keys, tokens) are never passed to a candidate by default.
 
-- 自动生成约束满足任务
-- Deterministic Verifier
-- Random baseline
-- Traditional solver baseline
-- 一个模型适配器
-- Benchmark runner
-- 1,000 个实例的首轮实验
-- 首轮实验结果：`docs/reports/csp-v0.1-first-run.md`（Random 1.1% vs Z3 95.0%）
+## Research Integrity
 
-## 仓库结构
+- No LLM judge for correctness — verification is deterministic.
+- Solver-neutral verification — the arena does not favor any provider or model.
+- Traditional-solver dominance is a valid research outcome.
+- Reproducibility metadata (git commit, VICA version, generator version, system
+  config, environment manifest, seed) is persisted per experiment.
+- Hidden verifier material (hidden tests, reference solution, verifier secret) is
+  isolated from solver inputs. See `docs/SPEC.md` "Verifier Material".
 
-```text
-vica/
-├── README.md
-├── AGENTS.md
-├── pyproject.toml
-├── .gitignore
-├── docs/
-│   ├── VISION.md
-│   ├── SPEC.md
-│   ├── ROADMAP.md
-│   ├── TASKS.md
-│   └── PROMPTS.md
-├── src/vica/
-│   ├── protocol/
-│   ├── challenges/
-│   ├── verifier/
-│   ├── systems/
-│   ├── arena/
-│   └── server/
-└── tests/
-```
+> Development Mode vs Evaluation Mode: a coding agent working directly in the
+> repo root can read `src/`. For a truly adversarial hidden benchmark, keep the
+> verifier secret / hidden tests / reference solution out of the agent's readable
+> workspace and give it only a public challenge bundle.
 
-## 推荐开发顺序
+---
 
-```text
-Protocol v0.1
-  ↓
-Canonical Serialization
-  ↓
-Challenge Interface
-  ↓
-CSP-v0.1
-  ↓
-Verifier
-  ↓
-Random Baseline
-  ↓
-Solver Baseline
-  ↓
-Model Adapter
-  ↓
-Benchmark Runner
-  ↓
-1,000-instance Experiment
-  ↓
-SYNTH-v0.1
-```
+## Challenge Families
 
-## 本地初始化
+| Challenge | Status | Purpose |
+|-----------|--------|---------|
+| CSP-v0.1 | Baseline | Infrastructure validation |
+| SYNTH-v0.1 | Experimental | Program-synthesis research |
+| OPT-v0.1 | Experimental | Continuous solution quality |
+
+Difficulty levels are **preset parameter packs**, not claims of scientifically
+calibrated universal difficulty.
+
+---
+
+## Benchmarks
+
+Historical / engineering-validation results are kept for provenance. They are
+**not** framed as final leaderboards:
+
+- `docs/reports/csp-v0.1-first-run.md` — CSET Random vs Z3 (infrastructure validation).
+- `docs/reports/synth-v0.1-scale.md` — SYNTH random vs brute (engineering validation;
+  predates verifier-secret hidden-material isolation).
+- `docs/reports/opt-v0.1-scale.md` — OPT baselines with exact DP reference.
+
+Reports predating the hidden-material isolation explicitly disclose that they are
+not adversarial public benchmarks.
+
+---
+
+## Quick Start
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-pytest
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e ".[dev,solver]"
+
+vica --help
+vica version
+vica benchmark --challenge csp-v0.1 --difficulty 1-3 --systems random,z3 --instances 1000 --seed 42
+vica report <experiment-id>
 ```
 
-## 文档
+The default database lives at `.vica/vica.db` (gitignored), so a fresh clone does
+not accumulate runtime artifacts in the repo root.
 
-- [项目愿景](docs/VISION.md)
-- [协议与技术规格](docs/SPEC.md)
-- [路线图](docs/ROADMAP.md)
-- [实施任务清单](docs/TASKS.md)
-- [Coding Agent 提示词](docs/PROMPTS.md)
+---
+
+## Documentation
+
+- [Vision](docs/VISION.md)
+- [Protocol & Technical Specification](docs/SPEC.md)
+- [Roadmap](docs/ROADMAP.md)
+- [Implementation Tasks](docs/TASKS.md)
+- Experiment reports: `docs/reports/`
+
+---
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
