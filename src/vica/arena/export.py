@@ -9,6 +9,12 @@ from typing import TextIO
 from vica.arena.metrics import SystemMetrics, aggregate
 from vica.protocol.models import RunRecord
 
+
+def _round_opt(value: float | None, ndigits: int) -> float | None:
+    """Round a metric, preserving ``None`` (UNKNOWN cost) as N/A."""
+    return round(value, ndigits) if value is not None else None
+
+
 _COLUMNS = [
     "experiment_id",
     "challenge_id",
@@ -38,7 +44,16 @@ def write_runs_csv(records: list[RunRecord], fh: TextIO) -> None:
 
 
 def write_runs_json(records: list[RunRecord], fh: TextIO) -> None:
-    json.dump([_record_to_row(r) for r in records], fh, ensure_ascii=False, indent=2)
+    # allow_nan=False keeps export consistent with the protocol, which forbids
+    # NaN/Infinity (SPEC "Data interchange"); any such value is a hard error
+    # rather than a silent, non-portable JSON emit.
+    json.dump(
+        [_record_to_row(r) for r in records],
+        fh,
+        ensure_ascii=False,
+        indent=2,
+        allow_nan=False,
+    )
 
 
 def write_metrics_csv(records: list[RunRecord], fh: TextIO) -> None:
@@ -78,10 +93,10 @@ def write_metrics_csv(records: list[RunRecord], fh: TextIO) -> None:
                 "p50_solve_ms": round(m.p50_solve_ms, 2),
                 "p95_solve_ms": round(m.p95_solve_ms, 2),
                 "mean_verify_us": round(m.mean_verify_us, 2),
-                "total_cost_usd": round(m.total_cost_usd, 6),
-                "mean_cost_per_instance": round(m.mean_cost_per_instance, 6),
-                "cost_per_valid_solution": round(m.cost_per_valid_solution, 6),
-                "valid_solutions_per_dollar": round(m.valid_solutions_per_dollar, 4),
+                "total_cost_usd": _round_opt(m.total_cost_usd, 6),
+                "mean_cost_per_instance": _round_opt(m.mean_cost_per_instance, 6),
+                "cost_per_valid_solution": _round_opt(m.cost_per_valid_solution, 6),
+                "valid_solutions_per_dollar": _round_opt(m.valid_solutions_per_dollar, 4),
                 "valid_solutions_per_second": round(m.valid_solutions_per_second, 4),
                 "mean_attempts": round(m.mean_attempts, 2),
                 "tokens_in": m.tokens_in,

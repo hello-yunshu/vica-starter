@@ -63,6 +63,9 @@ class DpOptSystem:
 
     system_id = "opt-dp"
 
+    def config(self) -> dict[str, Any]:
+        return {"strategy": "dp-exact", "algorithm": "bitmask-held-karp"}
+
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         payload = challenge.get("payload", {})
         processing = payload.get("processing")

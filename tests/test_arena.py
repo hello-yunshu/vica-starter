@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from vica.arena.export import write_metrics_csv, write_runs_csv
-from vica.arena.leaderboard import leaderboard_rows
+from vica.arena.leaderboard import format_leaderboard, leaderboard_rows
 from vica.arena.metrics import aggregate
 from vica.arena.runner import run_benchmark
 from vica.protocol.models import RunRecord
@@ -145,6 +145,52 @@ def test_metrics_aggregation() -> None:
     assert m.mean_attempts == pytest.approx((10 + 20 + 5) / 3)
 
 
+def test_unknown_cost_is_na_not_zero() -> None:
+    """A cost that is absent/None is UNKNOWN, never silently 0.
+
+    SPEC "Cost semantics": none of the cost-derived metrics may be reported as
+    0 when the cost is unknown — they must be N/A (None). A genuine known-zero
+    total cost must also not yield a bogus SPD (division by zero is undefined).
+    """
+    from vica.challenges.registry import build_challenge
+
+    ch = build_challenge("csp-v0.1", "cost-seed", 1)
+    base = dict(
+        experiment_id="exp-cost",
+        challenge_id=ch.id,
+        challenge_type=ch.type,
+        generator_version=ch.generator_version,
+        difficulty=ch.difficulty,
+        seed=ch.seed,
+        candidate=None,
+        solve_wall_time_ms=100.0,
+        verify_time_us=50,
+    )
+    # No 'estimated_cost_usd' key at all => UNKNOWN cost.
+    unknown = RunRecord(
+        **base, system_id="sys-unknown", valid=True, score=1.0, metadata={"attempts": 1}
+    )
+    uk = aggregate([unknown])[("sys-unknown", 1)]
+    assert uk.cost_known is False
+    assert uk.total_cost_usd is None
+    assert uk.mean_cost_per_instance is None
+    assert uk.cost_per_valid_solution is None
+    assert uk.valid_solutions_per_dollar is None  # SPD must be N/A, not computed
+
+    # Genuine known-zero total => SPD is undefined, reported as None, not inf.
+    zero = RunRecord(
+        **base,
+        system_id="sys-zero",
+        valid=True,
+        score=1.0,
+        metadata={"attempts": 1, "estimated_cost_usd": 0.0},
+    )
+    zc = aggregate([zero])[("sys-zero", 1)]
+    assert zc.cost_known is True
+    assert zc.total_cost_usd == pytest.approx(0.0)
+    assert zc.valid_solutions_per_dollar is None
+
+
 def test_leaderboard_rows(tmp_db: str) -> None:
     experiment_id = run_benchmark(
         challenge_type="csp-v0.1",
@@ -161,6 +207,31 @@ def test_leaderboard_rows(tmp_db: str) -> None:
     assert len(rows) == 1
     assert rows[0]["system_id"] == "random"
     assert rows[0]["instances"] == 4
+
+
+def test_leaderboard_renders_unknown_cost_as_na() -> None:
+    """UNKNOWN cost must render as N/A in the text leaderboard, not crash."""
+    from vica.challenges.registry import build_challenge
+    from vica.protocol.models import RunRecord
+
+    ch = build_challenge("synth-v0.1", "lb-na", 1)
+    base = dict(
+        experiment_id="e",
+        challenge_id=ch.id,
+        challenge_type=ch.type,
+        generator_version=ch.generator_version,
+        difficulty=ch.difficulty,
+        seed=ch.seed,
+        candidate=None,
+        solve_wall_time_ms=10.0,
+        verify_time_us=5,
+    )
+    # No estimated_cost_usd key => UNKNOWN cost.
+    r = RunRecord(**base, system_id="sys", valid=True, score=1.0, metadata={"attempts": 1})
+    rows = leaderboard_rows([r])
+    assert rows[0]["total_cost_usd"] is None
+    rendered = format_leaderboard(rows)
+    assert "N/A" in rendered
 
 
 def test_csv_export(tmp_db: str, tmp_path) -> None:

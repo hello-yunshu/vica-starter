@@ -70,18 +70,22 @@ def verify_candidate(challenge: dict[str, Any], candidate: Any) -> tuple[bool, f
     """Run the family's deterministic verifier on a candidate dict.
 
     *challenge* is a plain dict carrying ``type``/``payload`` keys (the
-    dict-form of a Challenge). Returns (valid, score). Never raises on
-    malformed input.
+    dict-form of a Challenge). Intended for solver self-checks, so it runs on
+    public material only: it never carries the verifier secret, meaning SYNTH
+    hidden tests are not checked here. The authoritative arena verifier
+    (``verify_submission``) is the source of truth. Returns (valid, score).
+    Never raises on malformed input.
     """
     try:
         family = get_family(str(challenge["type"]))
-        # Pass the full challenge dict; families normalize internally so
-        # they can recover seed/difficulty when needed (e.g. SYNTH-v0.1).
+        if hasattr(family, "evaluate"):
+            result = family.evaluate(challenge, candidate)
+            return result.valid, result.score
         valid = family.verify(challenge, candidate)
         score = family.score(challenge, candidate) if valid else 0.0
+        return valid, score
     except Exception:
-        valid, score = False, 0.0
-    return valid, score
+        return False, 0.0
 
 
 __all__ = [

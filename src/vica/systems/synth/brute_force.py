@@ -78,6 +78,13 @@ class BruteForceSynthSystem:
         self.max_candidates = max_candidates
         self.max_seconds = max_seconds
 
+    def config(self) -> dict[str, Any]:
+        return {
+            "max_nodes": self.max_nodes,
+            "max_candidates": self.max_candidates,
+            "max_seconds": self.max_seconds,
+        }
+
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         if isinstance(challenge, dict):
             payload: dict[str, Any] = challenge.get("payload", {})

@@ -20,7 +20,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-DEFAULT_DB = Path("vica.db")
+# Default DB lives under a gitignored `.vica/` dir so a fresh clone does not
+# accumulate a runtime artifact in the repo root (see docs/SPEC.md "Storage").
+DEFAULT_DB = Path(".vica/vica.db")
 
 
 @app.command()
@@ -60,19 +62,27 @@ def benchmark(
         )
         raise typer.Exit(1)
 
-    difficulties = _parse_difficulties(difficulty)
+    try:
+        difficulties = _parse_difficulties(difficulty)
+    except ValueError as exc:
+        typer.echo(f"error: invalid difficulty spec {difficulty!r}: {exc}", err=True)
+        raise typer.Exit(1) from exc
     if not difficulties:
         typer.echo("error: no difficulties parsed", err=True)
         raise typer.Exit(1)
 
-    experiment_id = run_benchmark(
-        challenge_type=challenge,
-        difficulties=difficulties,
-        systems=requested,
-        instances=instances,
-        seed=seed,
-        db_path=str(db),
-    )
+    try:
+        experiment_id = run_benchmark(
+            challenge_type=challenge,
+            difficulties=difficulties,
+            systems=requested,
+            instances=instances,
+            seed=seed,
+            db_path=str(db),
+        )
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"experiment id: {experiment_id}")
     typer.echo("run 'vica report <experiment-id>' to see metrics.")
 

@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 from vica.protocol.models import ErrorCode
+from vica.verifier.interfaces import EvaluationResult
 
 TYPE_NAME = "csp-v0.1"
 GENERATOR_VERSION = "0.1.0"
@@ -160,17 +161,28 @@ def _build_constraints(
     solution: dict[str, int],
     target_count: int,
 ) -> list[dict[str, Any]]:
-    """Assemble *target_count* constraints, each satisfied by *solution*."""
+    """Assemble exactly *target_count* constraints, each satisfied by *solution*.
+
+    Generation is deterministic (pure RNG), so a shortfall is a property of the
+    (seed, difficulty, preset) tuple, not a transient failure. We therefore
+    raise a deterministic generator error instead of silently emitting a weaker
+    instance that still claims the requested difficulty.
+    """
     generators = _constraint_generators(rng, variables, solution)
     constraints: list[dict[str, Any]] = []
     attempts = 0
-    max_attempts = target_count * 32
+    max_attempts = target_count * 64
     while len(constraints) < target_count and attempts < max_attempts:
         attempts += 1
         gen = rng.choice(generators)
         generated = gen()
         if generated is not None:
             constraints.append(generated)
+    if len(constraints) != target_count:
+        raise CSPGeneratorError(
+            f"csp-v0.1: only {len(constraints)}/{target_count} constraints "
+            f"generated for this seed (deterministic shortfall)"
+        )
     return constraints
 
 
@@ -229,10 +241,16 @@ class CSPV01:
     # ---------------------------------------------------------------- verifier
 
     def verify(self, payload: dict[str, Any], candidate: Any) -> bool:
-        return self.failure_code(payload, candidate) is None
+        return self.evaluate(payload, candidate).valid
 
     def score(self, payload: dict[str, Any], candidate: Any) -> float:
-        return 1.0 if self.verify(payload, candidate) else 0.0
+        return self.evaluate(payload, candidate).score
+
+    def evaluate(self, payload: dict[str, Any], candidate: Any) -> EvaluationResult:
+        """Single authoritative pass: validity + score computed exactly once."""
+        fail = self.failure_code(payload, candidate)
+        valid = fail is None
+        return EvaluationResult(valid=valid, score=1.0 if valid else 0.0, error_code=fail)
 
     def failure_code(self, payload: dict[str, Any], candidate: Any) -> ErrorCode | None:
         if not isinstance(payload, dict):

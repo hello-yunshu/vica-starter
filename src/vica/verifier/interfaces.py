@@ -5,9 +5,24 @@ See docs/SPEC.md sections 6-7.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from vica.protocol.models import ErrorCode, SolveOutput
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    """The single authoritative outcome of one evaluation.
+
+    ``valid``/``score``/``error_code`` are deterministic for the same logical
+    (challenge, candidate) input. Timing telemetry is *not* part of this
+    object — it is measurement, not semantics.
+    """
+
+    valid: bool
+    score: float
+    error_code: ErrorCode | None = None
 
 
 @runtime_checkable
@@ -33,6 +48,16 @@ class ChallengeFamily(Protocol):
 
     def score(self, challenge: dict[str, Any], candidate: Any) -> float:
         """Return a numerical score; 0.0 for invalid candidates."""
+        ...
+
+    def evaluate(self, challenge: dict[str, Any], candidate: Any) -> EvaluationResult:
+        """Single authoritative evaluation: (valid, score, error_code).
+
+        Implementations MUST run correctness + scoring exactly once (no
+        double evaluation). ``verify``/``score``/``failure_code`` may delegate
+        here, but the authoritative path (``verify_submission``) calls this
+        method once and reuses its result.
+        """
         ...
 
 

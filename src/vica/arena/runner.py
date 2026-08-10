@@ -16,6 +16,8 @@ not implicitly retry (retries are a strategy decision of the system).
 
 from __future__ import annotations
 
+import platform
+import secrets
 import subprocess
 import time
 import uuid
@@ -32,7 +34,11 @@ from vica.protocol.models import (
     SolveOutput,
 )
 from vica.storage.db import Storage
-from vica.systems.llm.llm_solver import LLMSolverSystem
+from vica.systems.llm.llm_solver import (
+    LLMSolverSystem,
+    SynthLLMAgentSystem,
+    SynthLLMOneShotSystem,
+)
 from vica.systems.opt.brute import BruteOptSystem
 from vica.systems.opt.dp import DpOptSystem
 from vica.systems.opt.edd import EddSystem
@@ -47,6 +53,8 @@ SYSTEM_FACTORIES: dict[str, Any] = {
     "random": lambda: RandomSearchSystem(),
     "z3": lambda: Z3SolverSystem(),
     "llm": lambda: LLMSolverSystem(),
+    "llm-one-shot": lambda: SynthLLMOneShotSystem(),
+    "llm-agent": lambda: SynthLLMAgentSystem(),
     "synth-random": lambda: RandomProgramSystem(),
     "synth-brute": lambda: BruteForceSynthSystem(),
     "opt-random": lambda: RandomOrderSystem(),
@@ -76,6 +84,54 @@ def git_commit() -> str | None:
 
 def _utcnow() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _environment_manifest() -> dict[str, Any]:
+    """Lightweight reproducibility manifest (SPEC "Reproducibility").
+
+    Records the interpreter / OS / git / relevant dependency versions. Never
+    includes credentials or API keys.
+    """
+    z3_version: str | None = None
+    try:
+        import z3
+
+        z3_version = z3.get_version_string()
+    except Exception:  # pragma: no cover - optional dependency
+        z3_version = None
+    return {
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "vica_version": __version__,
+        "git_commit": git_commit(),
+        "z3_version": z3_version,
+    }
+
+
+def _save_system_configs(storage: Storage, systems: list[str]) -> None:
+    """Persist each system's resolved configuration into the systems table.
+
+    Only safe, non-secret fields are recorded (SPEC "System config must be
+    persisted"). Credentials are never part of a system's ``config()``.
+    """
+    for name in systems:
+        try:
+            config = SYSTEM_FACTORIES[name]().config()
+        except Exception as exc:  # pragma: no cover - defensive
+            config = {"error": str(exc)}
+        storage.save_system(system_id=name, type_=name, config=config)
+
+
+def _all_difficulty_systems(difficulty_systems: dict[int, list[str]] | None) -> set[str]:
+    """Flatten per-difficulty system overrides into the full system set."""
+    extras: set[str] = set()
+    if difficulty_systems:
+        for extra in difficulty_systems.values():
+            extras.update(extra)
+    return extras
 
 
 def run_benchmark(
@@ -109,6 +165,11 @@ def run_benchmark(
 
     experiment_id = experiment_id or f"exp-{uuid.uuid4().hex[:12]}"
     storage = Storage(db_path)
+    # One verifier secret per experiment. It is stored in the experiment
+    # manifest (local DB) so the run is reproducible, but it is never written
+    # into a Challenge or passed to any solver. It authorizes the verifier to
+    # regenerate hidden material (docs/SPEC.md "Verifier material").
+    verifier_secret = secrets.token_hex(32)
     try:
         config = {
             "challenge_type": challenge_type,
@@ -117,6 +178,7 @@ def run_benchmark(
             "difficulty_systems": difficulty_systems,
             "instances": instances,
             "seed": seed,
+            "verifier_secret": verifier_secret,
         }
         storage.save_experiment(
             experiment_id=experiment_id,
@@ -124,7 +186,10 @@ def run_benchmark(
             created_at=_utcnow(),
             git_commit=git_commit(),
             vica_version=__version__,
+            environment=_environment_manifest(),
         )
+        system_set = sorted(set(systems) | _all_difficulty_systems(difficulty_systems))
+        _save_system_configs(storage, system_set)
 
         start_all = time.perf_counter()
         for difficulty in difficulties:
@@ -138,7 +203,9 @@ def run_benchmark(
                 storage.save_challenge(challenge, _utcnow())
 
                 for system_name in syss:
-                    run = _run_one(storage, experiment_id, challenge, system_name)
+                    run = _run_one(
+                        storage, experiment_id, challenge, system_name, verifier_secret
+                    )
                     storage.save_run(run, _utcnow())
 
         print(
@@ -156,6 +223,7 @@ def _run_one(
     experiment_id: str,
     challenge: Challenge,
     system_name: str,
+    verifier_secret: str,
 ) -> RunRecord:
     """Solve one challenge with one system, returning a RunRecord.
 
@@ -191,6 +259,19 @@ def _run_one(
 
     candidate = output.candidate
     if candidate is None:
+        # Distinguish an explicit solver timeout from genuinely wrong/no
+        # candidate. A timeout is a resource outcome, not an invalid solution
+        # (SPEC "Solver timeout semantics").
+        if output.metadata.get("status") == "timeout":
+            return _failure_record(
+                experiment_id,
+                challenge,
+                system_name,
+                ErrorCode.TIMEOUT,
+                output.metadata,
+                solve_ms,
+                "solver timed out without producing a candidate",
+            )
         return _failure_record(
             experiment_id,
             challenge,
@@ -207,7 +288,7 @@ def _run_one(
         candidate=candidate,
         metadata=output.metadata,
     )
-    result = verify_submission(challenge, submission)
+    result = verify_submission(challenge, submission, verifier_secret=verifier_secret)
 
     return RunRecord(
         experiment_id=experiment_id,

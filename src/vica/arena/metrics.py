@@ -11,7 +11,13 @@ from vica.protocol.models import RunRecord
 
 @dataclass
 class SystemMetrics:
-    """Aggregate metrics for one (system, difficulty) cell."""
+    """Aggregate metrics for one (system, difficulty) cell.
+
+    Cost semantics (SPEC "Cost semantics"): ``estimated_cost_usd`` is allowed
+    to be UNKNOWN (None). Cost-derived metrics therefore return ``None`` (N/A)
+    whenever any instance in the cell has an unknown cost — they must never be
+    silently reported as 0 to avoid implying the runs were free.
+    """
 
     system_id: str
     difficulty: int
@@ -21,6 +27,7 @@ class SystemMetrics:
     solve_times_ms: list[float] = field(default_factory=list)
     verify_times_us: list[int] = field(default_factory=list)
     costs_usd: list[float] = field(default_factory=list)
+    cost_unknown_instances: int = 0
     attempts: list[int] = field(default_factory=list)
     tokens_in: int = 0
     tokens_out: int = 0
@@ -50,21 +57,39 @@ class SystemMetrics:
         return statistics.fmean(self.verify_times_us) if self.verify_times_us else 0.0
 
     @property
-    def total_cost_usd(self) -> float:
+    def cost_known(self) -> bool:
+        """True when every instance's cost is known (no UNKNOWN costs)."""
+        return self.cost_unknown_instances == 0
+
+    @property
+    def total_cost_usd(self) -> float | None:
+        """Known total cost, or ``None`` when any instance has UNKNOWN cost."""
+        if not self.cost_known:
+            return None
         return sum(self.costs_usd)
 
     @property
-    def mean_cost_per_instance(self) -> float:
-        return self.total_cost_usd / self.instances if self.instances else 0.0
+    def mean_cost_per_instance(self) -> float | None:
+        if not self.cost_known or not self.instances:
+            return None
+        return sum(self.costs_usd) / self.instances
 
     @property
-    def cost_per_valid_solution(self) -> float:
-        return self.total_cost_usd / self.valid if self.valid else float("inf")
+    def cost_per_valid_solution(self) -> float | None:
+        if not self.cost_known or not self.valid:
+            return None
+        return sum(self.costs_usd) / self.valid
 
     @property
-    def valid_solutions_per_dollar(self) -> float:
-        """SPD — the flagship metric (plan section 23)."""
-        return self.valid / self.total_cost_usd if self.total_cost_usd > 0 else 0.0
+    def valid_solutions_per_dollar(self) -> float | None:
+        """SPD — the flagship metric (plan section 23). N/A when cost unknown."""
+        if not self.cost_known:
+            return None
+        total = sum(self.costs_usd)
+        if total <= 0:
+            # Known-but-zero total cost: division is undefined, do not claim 0.
+            return None
+        return self.valid / total
 
     @property
     def valid_solutions_per_second(self) -> float:
@@ -92,8 +117,12 @@ def aggregate(records: list[RunRecord]) -> dict[tuple[str, int], SystemMetrics]:
             cell.score_sum += r.score
         cell.solve_times_ms.append(r.solve_wall_time_ms)
         cell.verify_times_us.append(r.verify_time_us)
-        cost = float(r.metadata.get("estimated_cost_usd", 0.0) or 0.0)
-        cell.costs_usd.append(cost)
+        cost = r.metadata.get("estimated_cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            cell.costs_usd.append(float(cost))
+        else:
+            # Absent or None => cost is UNKNOWN, not zero (SPEC "Cost semantics").
+            cell.cost_unknown_instances += 1
         attempts = r.metadata.get("attempts")
         if isinstance(attempts, (int, float)):
             cell.attempts.append(int(attempts))

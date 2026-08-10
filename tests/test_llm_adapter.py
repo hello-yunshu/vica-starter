@@ -7,11 +7,18 @@ import json
 import pytest
 
 from vica.challenges.csp_v01 import generate
-from vica.systems import LLMSolverSystem
+from vica.challenges.synth_v01 import generate as synth_generate
+from vica.systems import (
+    LLMSolverSystem,
+    SynthLLMAgentSystem,
+    SynthLLMOneShotSystem,
+)
 from vica.systems.llm.llm_solver import (
     _estimate_cost_usd,
     build_csp_prompt,
+    build_synth_prompt,
     parse_candidate_json,
+    parse_synth_candidate,
 )
 
 
@@ -83,7 +90,8 @@ class TestParseJson:
 class TestCost:
     def test_cost_estimate(self) -> None:
         assert _estimate_cost_usd(1_000_000, 500_000, 1.0, 2.0) == pytest.approx(2.0)
-        assert _estimate_cost_usd(100, 100, None, None) == 0.0
+        # UNKNOWN pricing => UNKNOWN cost (None), never confused with free (0.0).
+        assert _estimate_cost_usd(100, 100, None, None) is None
 
 
 class TestConstructor:
@@ -166,3 +174,112 @@ class TestSolve:
         out = sys_.solve({"payload": generate("llm-seed", 1)})
         assert out.candidate is None
         assert out.metadata["last_error"] == "http_500"
+
+
+class TestSynthPrompt:
+    def test_prompt_includes_signature_and_examples(self) -> None:
+        payload = synth_generate("synth-seed", 2)
+        prompt = build_synth_prompt(payload)
+        assert "f" in prompt
+        assert "x" in prompt
+        assert "->" in prompt
+        assert "x * 2 + 3" in prompt  # example output format
+
+    def test_prompt_deterministic(self) -> None:
+        payload = synth_generate("synth-seed", 2)
+        assert build_synth_prompt(payload) == build_synth_prompt(payload)
+
+
+class TestParseSynth:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("x * 2 + 3", "x * 2 + 3"),
+            ("```dsl\nx + 1\n```", "x + 1"),
+            ("```\nf(x) = x - 2\n```", "x - 2"),
+            ('f(x) = x * 3', "x * 3"),
+            ("Here is the answer: x % 5", "x % 5"),
+        ],
+    )
+    def test_parse_synth(self, raw: str, expected: str) -> None:
+        assert parse_synth_candidate(raw) == expected
+
+    def test_parse_synth_empty(self) -> None:
+        assert parse_synth_candidate("") is None
+        assert parse_synth_candidate("   ") is None
+
+
+class TestSynthOneShot:
+    def test_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("VICA_LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        sys_ = SynthLLMOneShotSystem(model="test-model")
+        with pytest.raises(RuntimeError):
+            sys_.solve({"payload": synth_generate("synth-seed", 1)})
+
+    def test_mocked_transport_roundtrip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import vica.systems.llm.llm_solver as mod
+
+        def fake_transport(**kw):
+            assert kw.get("json_mode") is False
+            text = json.dumps(
+                {
+                    "choices": [{"message": {"content": "x + 1"}}],
+                    "usage": {"prompt_tokens": 90, "completion_tokens": 10},
+                }
+            )
+            return 200, text
+
+        monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
+        monkeypatch.setattr(mod, "_chat_completion", fake_transport)
+        sys_ = SynthLLMOneShotSystem(model="test-model")
+        out = sys_.solve({"payload": synth_generate("synth-seed", 1)})
+        assert out.candidate == {"program": "x + 1"}
+        assert out.metadata["strategy"] == "llm-one-shot"
+        assert out.metadata["input_tokens"] == 90
+
+
+class TestSynthAgent:
+    def test_agent_retries_until_public_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import vica.systems.llm.llm_solver as mod
+        from vica.challenges.synth_v01 import generate_with_solution
+
+        payload, sol = generate_with_solution("synth-agent-seed", 1, "test-verifier-secret")
+        correct = sol["target_program"]
+        wrong = "x + 1"
+
+        calls = {"n": 0}
+
+        def fake_transport(**kw):
+            calls["n"] += 1
+            prog = wrong if calls["n"] % 2 == 1 else correct
+            text = json.dumps(
+                {"choices": [{"message": {"content": prog}}], "usage": {}}
+            )
+            return 200, text
+
+        monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
+        monkeypatch.setattr(mod, "_chat_completion", fake_transport)
+        sys_ = SynthLLMAgentSystem(model="test-model", max_rounds=5)
+        out = sys_.solve({"payload": payload})
+        assert out.candidate == {"program": correct}
+        assert out.metadata["strategy"] == "llm-agent"
+        assert calls["n"] >= 2
+
+    def test_agent_returns_none_when_never_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import vica.systems.llm.llm_solver as mod
+
+        payload = synth_generate("synth-seed", 1)
+
+        def fake_transport(**kw):
+            text = json.dumps(
+                {"choices": [{"message": {"content": "999999"}}], "usage": {}}
+            )
+            return 200, text
+
+        monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
+        monkeypatch.setattr(mod, "_chat_completion", fake_transport)
+        sys_ = SynthLLMAgentSystem(model="test-model", max_rounds=2)
+        out = sys_.solve({"payload": payload})
+        assert out.candidate is None
+        assert out.metadata["rounds"] == 2

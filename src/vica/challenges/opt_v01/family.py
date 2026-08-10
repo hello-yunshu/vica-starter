@@ -24,6 +24,7 @@ from functools import lru_cache
 from typing import Any
 
 from vica.protocol.models import ErrorCode
+from vica.verifier.interfaces import EvaluationResult
 
 TYPE_NAME = "opt-v0.1"
 GENERATOR_VERSION = "0.1.0"
@@ -144,28 +145,26 @@ class OptV01:
         return generate(seed, difficulty)
 
     def verify(self, challenge: Any, candidate: Any) -> bool:
-        return self.failure_code(challenge, candidate) is None
+        return self.evaluate(challenge, candidate).valid
 
     def score(self, challenge: Any, candidate: Any) -> float:
-        resolved = _resolve(challenge.get("payload") if isinstance(challenge, dict) else None)
-        if resolved is None:
-            return 0.0
-        processing, deadlines, n = resolved
-        if _order_error(candidate, n) is not None:
-            return 0.0
-        return float(score_order(processing, deadlines, candidate["order"]))
+        return self.evaluate(challenge, candidate).score
 
-    def failure_code(self, challenge: Any, candidate: Any) -> ErrorCode | None:
+    def evaluate(self, challenge: Any, candidate: Any) -> EvaluationResult:
+        """Single authoritative pass: legality + objective computed exactly once."""
         payload = challenge.get("payload") if isinstance(challenge, dict) else None
         resolved = _resolve(payload)
         if resolved is None:
-            return ErrorCode.INVALID_SCHEMA
+            return EvaluationResult(valid=False, score=0.0, error_code=ErrorCode.INVALID_SCHEMA)
         processing, deadlines, n = resolved
         code = _order_error(candidate, n)
         if code is not None:
-            return code
-        # Valid permutation => always a legal schedule; score is the objective.
-        return None
+            return EvaluationResult(valid=False, score=0.0, error_code=code)
+        score = float(score_order(processing, deadlines, candidate["order"]))
+        return EvaluationResult(valid=True, score=score, error_code=None)
+
+    def failure_code(self, challenge: Any, candidate: Any) -> ErrorCode | None:
+        return self.evaluate(challenge, candidate).error_code
 
 
 FAMILY = OptV01()

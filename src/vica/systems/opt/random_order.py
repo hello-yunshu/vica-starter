@@ -17,6 +17,9 @@ class RandomOrderSystem:
     def __init__(self, seed: int = 0) -> None:
         self.seed = seed
 
+    def config(self) -> dict[str, Any]:
+        return {"seed": self.seed}
+
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         payload = challenge.get("payload", {})
         n = payload.get("n")

@@ -16,6 +16,9 @@ class EddSystem:
 
     system_id = "opt-edd"
 
+    def config(self) -> dict[str, Any]:
+        return {"strategy": "edd"}
+
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         payload = challenge.get("payload", {})
         deadlines = payload.get("deadlines")

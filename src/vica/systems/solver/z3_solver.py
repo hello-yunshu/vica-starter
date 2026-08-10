@@ -29,6 +29,15 @@ class Z3SolverSystem:
     def __init__(self, timeout_ms: int = 5000) -> None:
         self.timeout_ms = timeout_ms
 
+    def config(self) -> dict[str, Any]:
+        version = None
+        if z3 is not None:
+            try:
+                version = z3.get_version_string()
+            except Exception:  # pragma: no cover
+                version = None
+        return {"timeout_ms": self.timeout_ms, "z3_version": version}
+
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         if z3 is None:
             raise RuntimeError("z3-solver is not installed (pip install 'vica[solver]')")
@@ -59,8 +68,22 @@ class Z3SolverSystem:
             model = solver.model()
             candidate = {v: int(model.eval(x[v]).as_long()) for v in variables}
 
+        # Distinguish the solver outcomes precisely (SPEC "Solver timeout
+        # semantics"): a bounded CSP (no quantifiers, finite Int domain) is
+        # decidable, so `unknown` here is effectively the solver hitting its
+        # timeout — reported as TIMEOUT by the runner. `unsat` (logically no
+        # solution) is a different outcome and MUST NOT be labelled a timeout;
+        # for v0.1 generated challenges it should not occur, but the status is
+        # kept distinct so it is not misreported as a resource failure.
+        if sat_status == z3.sat:
+            status = "success"
+        elif sat_status == z3.unknown:
+            status = "timeout"
+        else:  # unsat
+            status = "unsat"
         metadata = {
             "strategy": f"z3:{sat_status}",
+            "status": status,
             "attempts": 1,
             "solve_wall_time_ms": elapsed_ms,
         }

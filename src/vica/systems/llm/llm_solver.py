@@ -80,6 +80,18 @@ class LLMSolverSystem:
             else _env_float("VICA_LLM_OUTPUT_PRICE_PER_MTOK")
         )
 
+    def config(self) -> dict[str, Any]:
+        """Non-secret LLM configuration for reproducibility (never the API key)."""
+        return {
+            "provider": "openai-compatible",
+            "model": self.model,
+            "base_url": self.base_url,
+            "timeout_seconds": self.timeout_seconds,
+            "max_retries": self.max_retries,
+            "input_price_per_mtok": self.input_price_per_mtok,
+            "output_price_per_mtok": self.output_price_per_mtok,
+        }
+
     # ------------------------------------------------------------------ solve
 
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
@@ -95,7 +107,7 @@ class LLMSolverSystem:
         input_tokens = 0
         output_tokens = 0
         attempts = 0
-        last_error = ""
+        last_error: str | None = None
         start = time.perf_counter()
 
         candidate: Any = None
@@ -197,6 +209,71 @@ def _render_constraint(c: dict[str, Any]) -> str:
     return f"{op}({vs})"
 
 
+# ------------------------------------------------------------------ synth prompt
+
+
+def build_synth_prompt(payload: dict[str, Any]) -> str:
+    """Render a SYNTH-v0.1 payload as an LLM-readable program-synthesis prompt.
+
+    The task is to write a pure integer expression (DSL) that reproduces every
+    public (input -> output) example. The DSL is deliberately small:
+    operators ``+ - * % //``, ``min``/``max``, unary ``abs``/``neg``, integer
+    literals, and the named variables.
+    """
+    try:
+        fn_name = str(payload["function"]["name"])
+        params = list(payload["function"]["params"])
+        public_tests = list(payload["public_tests"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("payload is not a synth-v0.1 payload") from None
+
+    lines = [
+        "Write a pure integer expression that matches every input->output example.",
+        "",
+        f"Define a function named {fn_name} with parameter(s): {', '.join(params)}.",
+        "",
+        "Allowed expression language (no if/loops/assignment):",
+        "  - integer literals (e.g. 3, -12)",
+        "  - the variables: " + ", ".join(params),
+        "  - binary operators: + - * % //",
+        "  - min(a, b), max(a, b)",
+        "  - unary: abs(x), and unary minus -x",
+        "",
+        "Examples (input -> expected output):",
+    ]
+    for t in public_tests:
+        inp = ", ".join(f"{k}={v}" for k, v in t["input"].items())
+        lines.append(f"  f({inp}) -> {t['expected']}")
+    lines += [
+        "",
+        "Respond with ONLY a single expression (no code fence, no explanation), "
+        "e.g.:  x * 2 + 3",
+    ]
+    return "\n".join(lines)
+
+
+def parse_synth_candidate(raw: str) -> str | None:
+    """Extract a single DSL expression string from an LLM response body.
+
+    Tolerates markdown fences and trailing prose; returns None on failure.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:dsl|text)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    # Strip a leading "f(...) =" or "f(x) =" if the model echoed the signature.
+    text = re.sub(r"^[A-Za-z_]\w*\s*\([^)]*\)\s*=\s*", "", text)
+    # Drop natural-language prose that precedes the expression (DSL has no colon).
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1]
+    text = text.strip().strip("`").strip()
+    if not text:
+        return None
+    return text
+
+
 # ------------------------------------------------------------------- parsing
 
 
@@ -235,9 +312,15 @@ def _estimate_cost_usd(
     output_tokens: int,
     input_price_per_mtok: float | None,
     output_price_per_mtok: float | None,
-) -> float:
+) -> float | None:
+    """Estimate API cost in USD, or ``None`` when pricing is not configured.
+
+    ``None`` means UNKNOWN / NOT MEASURED — it must never be rendered as $0. A
+    genuine $0 is only reported when both prices are configured and no tokens
+    were exchanged. See docs/SPEC.md "Cost semantics".
+    """
     if input_price_per_mtok is None or output_price_per_mtok is None:
-        return 0.0
+        return None
     return (input_tokens / 1e6) * input_price_per_mtok + (
         output_tokens / 1e6
     ) * output_price_per_mtok
@@ -250,22 +333,21 @@ def _chat_completion(
     model: str,
     prompt: str,
     timeout_seconds: float,
+    system_content: str = "You are a precise problem solver. Always output valid JSON.",
+    json_mode: bool = True,
 ) -> tuple[int, str]:
     url = f"{base_url}/chat/completions"
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a precise problem solver. Always output valid JSON.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.0,
-            "response_format": {"type": "json_object"},
-        }
-    ).encode("utf-8")
+    payload_body: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.0,
+    }
+    if json_mode:
+        payload_body["response_format"] = {"type": "json_object"}
+    body = json.dumps(payload_body).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=body,
@@ -281,9 +363,308 @@ def _chat_completion(
         return 0, f"network_error: {type(exc).__name__}"
 
 
+# ------------------------------------------------------------------ synth LLM systems
+
+
+class SynthLLMOneShotSystem:
+    """LLM program-synthesis participant: a single-shot expression guess.
+
+    Feeds the public examples to the LLM, asks for one DSL expression, and
+    submits it. The verifier is the sole authority on correctness. This is the
+    ``llm-one-shot`` baseline from the SYNTH design doc.
+    """
+
+    system_id = "llm-one-shot"
+
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        timeout_seconds: float | None = None,
+        max_retries: int | None = None,
+        input_price_per_mtok: float | None = None,
+        output_price_per_mtok: float | None = None,
+    ) -> None:
+        self.model = model or os.environ.get("VICA_LLM_MODEL", "") or ""
+        if not self.model:
+            raise ValueError(
+                "SynthLLMOneShotSystem requires a model via VICA_LLM_MODEL or the "
+                "'model' argument"
+            )
+        self.base_url = (
+            base_url or os.environ.get("VICA_LLM_BASE_URL") or _DEFAULT_BASE_URL
+        ).rstrip("/")
+        self.api_key = (
+            api_key or os.environ.get("VICA_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        )
+        self.timeout_seconds = timeout_seconds or float(
+            os.environ.get("VICA_LLM_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS)
+        )
+        self.max_retries = max_retries or int(
+            os.environ.get("VICA_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
+        )
+        self.input_price_per_mtok = (
+            input_price_per_mtok
+            if input_price_per_mtok is not None
+            else _env_float("VICA_LLM_INPUT_PRICE_PER_MTOK")
+        )
+        self.output_price_per_mtok = (
+            output_price_per_mtok
+            if output_price_per_mtok is not None
+            else _env_float("VICA_LLM_OUTPUT_PRICE_PER_MTOK")
+        )
+
+    def config(self) -> dict[str, Any]:
+        """Non-secret LLM configuration for reproducibility (never the API key)."""
+        return {
+            "provider": "openai-compatible",
+            "model": self.model,
+            "base_url": self.base_url,
+            "timeout_seconds": self.timeout_seconds,
+            "max_retries": self.max_retries,
+            "input_price_per_mtok": self.input_price_per_mtok,
+            "output_price_per_mtok": self.output_price_per_mtok,
+        }
+
+    def solve(self, challenge: dict[str, Any]) -> SolveOutput:
+        if not self.api_key:
+            raise RuntimeError(
+                "SynthLLMOneShotSystem: no API key configured; set VICA_LLM_API_KEY "
+                "or OPENAI_API_KEY"
+            )
+        payload = challenge.get("payload", {})
+        prompt = build_synth_prompt(payload)
+
+        input_tokens = 0
+        output_tokens = 0
+        attempts = 0
+        last_error: str | None = None
+        start = time.perf_counter()
+        program: str | None = None
+        for _ in range(self.max_retries + 1):
+            attempts += 1
+            status, text = _chat_completion(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                model=self.model,
+                prompt=prompt,
+                timeout_seconds=self.timeout_seconds,
+                system_content="You are a precise program synthesizer. "
+                    "Output only an expression.",
+                json_mode=False,
+            )
+            if status != 200:
+                last_error = f"http_{status}"
+                continue
+            try:
+                data = json.loads(text)
+                content = data["choices"][0]["message"]["content"]
+                usage = data.get("usage") or {}
+                input_tokens = int(usage.get("prompt_tokens", 0))
+                output_tokens = int(usage.get("completion_tokens", 0))
+                program = parse_synth_candidate(content)
+                if program:
+                    break
+                last_error = "parse:empty"
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                last_error = f"parse:{type(exc).__name__}"
+
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        metadata = {
+            "strategy": "llm-one-shot",
+            "attempts": attempts,
+            "model": self.model,
+            "provider": "openai-compatible",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "estimated_cost_usd": _estimate_cost_usd(
+                input_tokens, output_tokens, self.input_price_per_mtok, self.output_price_per_mtok
+            ),
+            "solve_wall_time_ms": elapsed_ms,
+            "last_error": last_error or None,
+        }
+        candidate = {"program": program} if program else None
+        return SolveOutput(candidate=candidate, metadata=metadata)
+
+
+class SynthLLMAgentSystem:
+    """LLM agent program-synthesis: generate, self-check on public tests,
+    feed back failures, retry.
+
+    Runs at most ``max_rounds`` iterations. Each round the LLM proposes an
+    expression; the agent evaluates it against the public tests locally (via
+    the family's cheap public-tests helper) purely as a self-check and returns
+    the failing example to the LLM as feedback. The arena verifier remains the
+    sole authority. This is the ``llm-agent`` baseline.
+    """
+
+    system_id = "llm-agent"
+
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        timeout_seconds: float | None = None,
+        max_retries: int | None = None,
+        max_rounds: int = 5,
+        input_price_per_mtok: float | None = None,
+        output_price_per_mtok: float | None = None,
+    ) -> None:
+        self.model = model or os.environ.get("VICA_LLM_MODEL", "") or ""
+        if not self.model:
+            raise ValueError(
+                "SynthLLMAgentSystem requires a model via VICA_LLM_MODEL or the "
+                "'model' argument"
+            )
+        self.base_url = (
+            base_url or os.environ.get("VICA_LLM_BASE_URL") or _DEFAULT_BASE_URL
+        ).rstrip("/")
+        self.api_key = (
+            api_key or os.environ.get("VICA_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        )
+        self.timeout_seconds = timeout_seconds or float(
+            os.environ.get("VICA_LLM_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS)
+        )
+        self.max_retries = max_retries or int(
+            os.environ.get("VICA_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
+        )
+        self.max_rounds = max_rounds
+        self.input_price_per_mtok = (
+            input_price_per_mtok
+            if input_price_per_mtok is not None
+            else _env_float("VICA_LLM_INPUT_PRICE_PER_MTOK")
+        )
+        self.output_price_per_mtok = (
+            output_price_per_mtok
+            if output_price_per_mtok is not None
+            else _env_float("VICA_LLM_OUTPUT_PRICE_PER_MTOK")
+        )
+
+    def config(self) -> dict[str, Any]:
+        """Non-secret LLM configuration for reproducibility (never the API key)."""
+        return {
+            "provider": "openai-compatible",
+            "model": self.model,
+            "base_url": self.base_url,
+            "timeout_seconds": self.timeout_seconds,
+            "max_retries": self.max_retries,
+            "max_rounds": self.max_rounds,
+            "input_price_per_mtok": self.input_price_per_mtok,
+            "output_price_per_mtok": self.output_price_per_mtok,
+        }
+
+    def solve(self, challenge: dict[str, Any]) -> SolveOutput:
+        if not self.api_key:
+            raise RuntimeError(
+                "SynthLLMAgentSystem: no API key configured; set VICA_LLM_API_KEY "
+                "or OPENAI_API_KEY"
+            )
+        payload = challenge.get("payload", {})
+        from vica.challenges.synth_v01.family import public_tests_ok
+
+        input_tokens = 0
+        output_tokens = 0
+        attempts = 0
+        last_error: str | None = None
+        completed_rounds = 0
+        start = time.perf_counter()
+        program: str | None = None
+
+        prompt = build_synth_prompt(payload)
+        feedback: str | None = None
+        for _ in range(self.max_rounds):
+            completed_rounds += 1
+            round_prompt = (
+                prompt if not feedback else f"{prompt}\n\nYour last answer failed.\n{feedback}"
+            )
+            for _ in range(self.max_retries + 1):
+                attempts += 1
+                status, text = _chat_completion(
+                    base_url=self.base_url,
+                    api_key=self.api_key,
+                    model=self.model,
+                    prompt=round_prompt,
+                    timeout_seconds=self.timeout_seconds,
+                    system_content="You are a precise program synthesizer. "
+                    "Output only an expression.",
+                    json_mode=False,
+                )
+                if status != 200:
+                    last_error = f"http_{status}"
+                    continue
+                try:
+                    data = json.loads(text)
+                    content = data["choices"][0]["message"]["content"]
+                    usage = data.get("usage") or {}
+                    input_tokens += int(usage.get("prompt_tokens", 0))
+                    output_tokens += int(usage.get("completion_tokens", 0))
+                    candidate_prog = parse_synth_candidate(content)
+                    if not candidate_prog:
+                        last_error = "parse:empty"
+                        continue
+                    if public_tests_ok(payload, candidate_prog):
+                        program = candidate_prog
+                        break
+                    # Self-check failed: build feedback from first failing example.
+                    feedback = _first_failure(payload, candidate_prog)
+                    last_error = None
+                    break
+                except (KeyError, IndexError, TypeError, ValueError) as exc:
+                    last_error = f"parse:{type(exc).__name__}"
+            if program is not None:
+                break
+
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        metadata = {
+            "strategy": "llm-agent",
+            "attempts": attempts,
+            "rounds": completed_rounds,
+            "model": self.model,
+            "provider": "openai-compatible",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "estimated_cost_usd": _estimate_cost_usd(
+                input_tokens, output_tokens, self.input_price_per_mtok, self.output_price_per_mtok
+            ),
+            "solve_wall_time_ms": elapsed_ms,
+            "last_error": last_error or None,
+        }
+        candidate = {"program": program} if program else None
+        return SolveOutput(candidate=candidate, metadata=metadata)
+
+
+def _first_failure(payload: dict[str, Any], src: str) -> str:
+    """Return a human-readable feedback string for the first failing public test."""
+    from vica.challenges.synth_v01.family import eval_program, parse_program
+
+    try:
+        node = parse_program(src)
+    except Exception as exc:
+        return f"Your expression is not valid: {exc}"
+    for t in payload.get("public_tests", []):
+        try:
+            got = eval_program(node, dict(t["input"]))
+        except Exception as exc:
+            inp = ", ".join(f"{k}={v}" for k, v in t["input"].items())
+            return f"f({inp}) raised an error: {exc}"
+        if got != t["expected"]:
+            inp = ", ".join(f"{k}={v}" for k, v in t["input"].items())
+            return f"f({inp}) -> {got}, expected {t['expected']}"
+    return "Your expression passed all public tests."
+
+
 __all__ = [
     "LLMSolverSystem",
+    "SynthLLMAgentSystem",
+    "SynthLLMOneShotSystem",
     "build_csp_prompt",
+    "build_synth_prompt",
     "parse_candidate_json",
+    "parse_synth_candidate",
+    "_chat_completion",
     "_estimate_cost_usd",
 ]

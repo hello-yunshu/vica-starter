@@ -23,6 +23,9 @@ class BruteOptSystem:
     def __init__(self, max_seconds: float = 10.0) -> None:
         self.max_seconds = max_seconds
 
+    def config(self) -> dict[str, Any]:
+        return {"max_seconds": self.max_seconds}
+
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         payload = challenge.get("payload", {})
         processing = payload.get("processing")

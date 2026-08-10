@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
     config_json TEXT NOT NULL,
+    env_json TEXT,
     git_commit TEXT,
     vica_version TEXT
 );
@@ -79,11 +80,22 @@ class Storage:
         created_at: str,
         git_commit: str | None,
         vica_version: str,
+        environment: dict | None = None,
     ) -> None:
+        # Canonical JSON rejects NaN/Infinity, keeping storage consistent with
+        # the protocol (SPEC "Data interchange").
         self.conn.execute(
             "INSERT OR REPLACE INTO experiments "
-            "(id, created_at, config_json, git_commit, vica_version) VALUES (?, ?, ?, ?, ?)",
-            (experiment_id, created_at, json.dumps(config), git_commit, vica_version),
+            "(id, created_at, config_json, env_json, git_commit, vica_version) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                experiment_id,
+                created_at,
+                canonical_json_bytes(config).decode("utf-8"),
+                canonical_json_bytes(environment or {}).decode("utf-8"),
+                git_commit,
+                vica_version,
+            ),
         )
         self.conn.commit()
 
@@ -108,7 +120,7 @@ class Storage:
     def save_system(self, system_id: str, type_: str, config: dict) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO systems (id, type, config_json) VALUES (?, ?, ?)",
-            (system_id, type_, json.dumps(config)),
+            (system_id, type_, canonical_json_bytes(config).decode("utf-8")),
         )
         self.conn.commit()
 
@@ -133,7 +145,7 @@ class Storage:
                 record.solve_wall_time_ms,
                 record.verify_time_us,
                 record.error_code.value if record.error_code else None,
-                json.dumps(record.metadata),
+                canonical_json_bytes(record.metadata).decode("utf-8"),
                 created_at,
             ),
         )

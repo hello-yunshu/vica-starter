@@ -39,6 +39,9 @@ class RandomProgramSystem:
         self.max_seconds = max_seconds
         self.seed = seed
 
+    def config(self) -> dict[str, Any]:
+        return {"attempts": self.attempts, "max_seconds": self.max_seconds, "seed": self.seed}
+
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         if isinstance(challenge, dict):
             payload: dict[str, Any] = challenge.get("payload", {})
