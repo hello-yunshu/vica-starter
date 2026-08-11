@@ -144,8 +144,11 @@ vica report <experiment-id>
 
 - [愿景](docs/VISION.md)
 - [协议与技术规范](docs/SPEC.md)
+- [基准方法论](docs/BENCHMARK_METHODOLOGY.md)
+- [Bundle 格式](docs/protocol/BUNDLE.md)
 - [路线图](docs/ROADMAP.md)
 - [实施任务](docs/TASKS.md)
+- [Challenge 研究实验室](docs/challenge-research/README.md)
 - 实验报告：`docs/reports/`
 
 ---
