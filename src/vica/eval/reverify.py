@@ -34,6 +34,7 @@ from vica.eval.models import EvaluationFailure, ReportStatus, ResultRecord, to_r
 from vica.eval.verify import MAX_RESULT_FILE_BYTES, load_result_bundle
 from vica.protocol.models import CandidateSubmission, Challenge
 from vica.protocol.serialization import stable_hash
+from vica.repo.family import REPO_TYPE_NAME, repo_result_metadata
 from vica.verifier.verifier import verify_submission
 
 # The Result Bundle stores its own copy of the challenges and raw submissions,
@@ -226,6 +227,10 @@ def _reverify_one(
         if optimal is not None:
             meta["optimal_score"] = optimal
             meta["regret"] = optimal - result.score
+    # Recompute the authoritative REPO result facts (workspace_hash / task_kind
+    # / patch_hash / patch_bytes / changed_files / changed_lines) so reverify
+    # binds them (§50) instead of trusting the stored metadata verbatim.
+    meta = repo_result_metadata(ch, candidate, meta)
     return to_result_record(
         challenge_id=challenge.id,
         challenge_type=ch.get("type", ""),
@@ -283,7 +288,7 @@ def _compare(stored: dict[str, Any], recomputed: ResultRecord) -> dict[str, Any]
         and _norm_score(stored.get("score")) == _norm_score(recomputed.score)
         and stored_code == recomputed_code
         and stored.get("status") == recomputed.status.value
-    ):
+    ) and _repo_facts_match(stored, recomputed):
         return None
     return {
         "challenge_id": recomputed.challenge_id,
@@ -296,6 +301,26 @@ def _compare(stored: dict[str, Any], recomputed: ResultRecord) -> dict[str, Any]
         "stored_status": stored.get("status"),
         "recomputed_status": recomputed.status.value,
     }
+
+
+def _repo_facts_match(stored: dict[str, Any], recomputed: ResultRecord) -> bool:
+    """Bind REPO verifier facts (§50): workspace_hash + patch_hash.
+
+    For a REPO result the recomputed metadata carries the authoritative
+    ``workspace_hash`` (from the challenge payload) and ``patch_hash`` (from the
+    applied patch). A tampered stored result that swaps these facts is detected
+    even when valid/score/status happen to coincide. Non-REPO results are never
+    bound on these fields.
+    """
+    if recomputed.challenge_type != REPO_TYPE_NAME:
+        return True
+    stored_meta = stored.get("metadata")
+    if not isinstance(stored_meta, dict):
+        return False
+    for key in ("workspace_hash", "patch_hash"):
+        if stored_meta.get(key) != recomputed.metadata.get(key):
+            return False
+    return True
 
 
 def _norm_score(v: Any) -> float:
