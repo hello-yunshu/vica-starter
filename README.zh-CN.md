@@ -4,6 +4,8 @@
 
 **Verifiable Intelligence Compute Arena** · 可验证智能计算竞技场
 
+**VICA 1.0 — Research Benchmark Stable**
+
 一个 Local Research Arena，用于度量不同计算系统——LLM、Coding Agent、传统算法与
 混合系统——在自动生成、客观可验证任务上的表现。
 
@@ -30,6 +32,10 @@ VICA 研究的不只是"哪个模型聊天最好"，而是：
 ---
 
 ## 当前状态
+
+VICA 1.0 冻结了以下协议与 Benchmark 表面。它是 **Local Research Arena**——无托管
+服务、无在线排行榜、无加固的任意代码沙箱。见 `docs/SPEC.md`「Compatibility Contract」
+与 `docs/MIGRATION.md`。
 
 VICA 是 Local Research Arena。以下组件当前已存在：
 

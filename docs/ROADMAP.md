@@ -4,7 +4,7 @@
 
 > 先验证“可验证智能任务是否成立”，再建设平台；先有实验数据，再定义指标；先攻击 Challenge，再扩大生态。
 
-## 当前研究状态（v0.4.0 / Benchmark Validation & Reproducibility）
+## 当前研究状态（v1.0.0 / Research Benchmark Stable）
 
 ### 版本定位
 
@@ -13,6 +13,7 @@ v0.1.0 = Research Integrity / Protocol Foundation Freeze
 v0.2.0 = Benchmark Research & External Evaluation
 v0.3.0 = Agent Benchmark（REPO-v0.1）
 v0.4.0 = Benchmark Validation & Reproducibility
+v1.0.0 = Research Benchmark Stable（Protocol + Benchmark Framework 正式冻结）
 ```
 
 v0.1.0 已冻结可信基础设施：deterministic verifier、challenge identity、
@@ -320,6 +321,49 @@ Hosted Service / Public Arena                       Not Implemented / Out of Sco
 v0.4.0 明确**不**做：Server / Web UI / Public API / Hosted Arena / SaaS /
 Distributed Worker / Billing / Token / Wallet / Marketplace / WebSocket /
 远程数据库。
+
+---
+
+## v1.0.0 — Research Benchmark Stable
+
+对 v0.3/v0.4 建立的协议与 Benchmark 表面做**正式冻结**（Freeze /
+Compatibility / Release），不新增功能。
+
+交付：
+
+- **Protocol stable surface**：Challenge / Candidate / Result，Evaluation /
+  Submission / Result Bundle v1+v2，Workspace，Patch Candidate，Task Pack，
+  Execution Profile，Strict Reverify。
+- **Stable CLI**：`vica version / benchmark / report / eval prepare|inspect|
+  verify / solver run / agent run|noop|reference / reverify / study run`；
+  CLI UX 审计（help 文案、路径语义、错误信息）。
+- **Compatibility contract**（`docs/SPEC.md`）：v1/v2 Bundle 读取、Challenge
+  identity、canonical serialization、verifier authority、UNKNOWN cost
+  语义、material commitment、Result integrity、strict reverify 全部 **Stable**；
+  SYNTH/OPT 科学、OS 沙箱、Docker backend、agent-performance calibration
+  保持 **Experimental**。
+- **Formal REPO Task Pack** `repo-v0.1-core`：≥6 templates、≥24 可复现
+  instance、repair + implementation、difficulty 1–3；每个 released instance
+  满足 reference pass / NoOp fail / workspace hash 可复现 / reverify 一致。
+- **Release docs**：`docs/MIGRATION.md`、`SECURITY.md`；README v1.0 状态。
+- **Packaging**：wheel + sdist 构建、fresh venv 安装 smoke（`vica version`、
+  `vica --help`、最小 CSP + REPO verify/reverify）。
+- Platform：Linux + macOS 支持；Windows **不支持**；PyPI 未配置发布。
+
+成熟度声明：
+
+```text
+Protocol Core / Evaluation Bundles / Reverify        Stable
+REPO-v0.1 / Task Pack / Execution Profile / Study    Stable（Released）
+CSP-v0.1                                             Stable/Baseline
+SYNTH-v0.1 / OPT-v0.1 / OS Sandbox / Docker          Experimental
+外部 Coding Agent 实证校准                            Not Yet Established
+Hosted Service / Public Arena                        Not Implemented / Out of Scope
+```
+
+v1.0.0 明确**不**做：Server / Web UI / Public API / Hosted Arena / SaaS /
+Distributed Worker / Billing / Token / Wallet / Marketplace / WebSocket /
+远程数据库 / 在线排行榜。
 
 ---
 
