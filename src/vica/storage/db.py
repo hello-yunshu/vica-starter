@@ -14,12 +14,14 @@ from vica.protocol.serialization import canonical_json_bytes
 
 _SCHEMA_VERSION = 2
 
-_SCHEMA = """
+# v0 — the real legacy schema shipped by the initial v0.1 release
+# (origin/main ee61542): experiments has NO env_json and there is no
+# experiment_systems table. A migration must upgrade such a database.
+_V0_SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (
     id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
     config_json TEXT NOT NULL,
-    env_json TEXT,
     git_commit TEXT,
     vica_version TEXT
 );
@@ -36,13 +38,6 @@ CREATE TABLE IF NOT EXISTS systems (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     config_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS experiment_systems (
-    experiment_id TEXT NOT NULL,
-    system_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    config_json TEXT NOT NULL,
-    PRIMARY KEY (experiment_id, system_id)
 );
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,6 +61,17 @@ CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_runs_system ON runs(system_id, difficulty);
 """
 
+# v2 — experiment-scoped system config snapshots.
+_V2_SCHEMA = """
+CREATE TABLE IF NOT EXISTS experiment_systems (
+    experiment_id TEXT NOT NULL,
+    system_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, system_id)
+);
+"""
+
 
 class Storage:
     """Thin SQLite wrapper. One connection per process lifetime is enough for MVP."""
@@ -78,19 +84,36 @@ class Storage:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Idempotent schema migration via ``PRAGMA user_version``.
+        """Versioned, idempotent schema migration via ``PRAGMA user_version``.
 
-        Legacy v0.1 databases have no ``experiment_systems`` table (system
-        configs lived in the global ``systems`` table and were overwritten by
-        later experiments). Opening any database — fresh or legacy — converges
-        on the current schema: all DDL is ``CREATE TABLE IF NOT EXISTS``, and
-        ``user_version`` is set to the current schema version. Historical runs
-        are never touched.
+        Steps (never run out of order):
+        - v0: the real legacy schema (experiments without ``env_json``, no
+          ``experiment_systems``) — created as-is when absent;
+        - v1: add ``experiments.env_json`` if the column is missing;
+        - v2: create ``experiment_systems`` (experiment-scoped system configs).
+
+        Opening any database — fresh, real legacy, or current — converges on
+        the current schema. Historical rows are never touched or rewritten.
         """
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        self.conn.executescript(_SCHEMA)
-        if version != _SCHEMA_VERSION:
-            self.conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        has_experiments = (
+            self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiments'"
+            ).fetchone()
+            is not None
+        )
+        if version < 1 or not has_experiments:
+            self.conn.executescript(_V0_SCHEMA)
+            version = 1
+            self.conn.execute("PRAGMA user_version = 1")
+        if version < 2:
+            columns = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(experiments)")
+            }
+            if "env_json" not in columns:
+                self.conn.execute("ALTER TABLE experiments ADD COLUMN env_json TEXT")
+            self.conn.executescript(_V2_SCHEMA)
+            self.conn.execute("PRAGMA user_version = 2")
         self.conn.commit()
 
     def close(self) -> None:
