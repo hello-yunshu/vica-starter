@@ -29,6 +29,16 @@ BUNDLE_FORMAT_VERSION = "1"
 SUBMISSION_BUNDLE_VERSION = "1"
 RESULT_BUNDLE_VERSION = "1"
 
+# Bundle v2 (v0.3 Workspace Benchmark, docs/SPEC.md "Evaluation Bundle
+# Versioning"). The evaluation layout adds a solver-visible ``workspaces/``
+# directory (representing the REPO challenge workspaces as real files) while
+# keeping the v1 file names so a v1 reader never misinterprets a v2 artifact.
+# Only the advertised version string differs; the dispatcher routes a v1 bundle
+# strictly to the v1 reader and a v2 bundle strictly to the v2 reader.
+BUNDLE_FORMAT_VERSION_V2 = "2"
+SUBMISSION_BUNDLE_VERSION_V2 = "2"
+RESULT_BUNDLE_VERSION_V2 = "2"
+
 
 class ReportStatus(StrEnum):
     """Report-level failure taxonomy (docs/BENCHMARK_METHODOLOGY.md).
@@ -49,6 +59,12 @@ class ReportStatus(StrEnum):
     SANDBOX_ERROR = "sandbox_error"
     INTERNAL_ERROR = "internal_error"
     UNSUPPORTED = "unsupported"
+    # v0.3 REPO challenge report statuses.
+    PROCESS_FAILURE = "process_failure"
+    PATCH_APPLY_FAILURE = "patch_apply_failure"
+    STRUCTURAL_VIOLATION = "structural_violation"
+    PUBLIC_TEST_FAILURE = "public_test_failure"
+    HIDDEN_TEST_FAILURE = "hidden_test_failure"
 
 
 class EvaluationFailure(RuntimeError):
@@ -144,16 +160,25 @@ def _status_for(error_code: ErrorCode | None, valid: bool) -> ReportStatus:
         ErrorCode.TIMEOUT: ReportStatus.TIMEOUT,
         ErrorCode.SANDBOX_ERROR: ReportStatus.SANDBOX_ERROR,
         ErrorCode.INTERNAL_ERROR: ReportStatus.INTERNAL_ERROR,
+        ErrorCode.NO_CANDIDATE: ReportStatus.NO_CANDIDATE,
+        ErrorCode.PROCESS_FAILURE: ReportStatus.PROCESS_FAILURE,
+        ErrorCode.PATCH_APPLY_FAILURE: ReportStatus.PATCH_APPLY_FAILURE,
+        ErrorCode.STRUCTURAL_VIOLATION: ReportStatus.STRUCTURAL_VIOLATION,
+        ErrorCode.PUBLIC_TEST_FAILURE: ReportStatus.PUBLIC_TEST_FAILURE,
+        ErrorCode.HIDDEN_TEST_FAILURE: ReportStatus.HIDDEN_TEST_FAILURE,
     }
     return mapping.get(error_code, ReportStatus.INTERNAL_ERROR)
 
 
 __all__ = [
     "BUNDLE_FORMAT_VERSION",
+    "BUNDLE_FORMAT_VERSION_V2",
     "EvaluationFailure",
     "ReportStatus",
     "RESULT_BUNDLE_VERSION",
+    "RESULT_BUNDLE_VERSION_V2",
     "ResultRecord",
     "SUBMISSION_BUNDLE_VERSION",
+    "SUBMISSION_BUNDLE_VERSION_V2",
     "to_result_record",
 ]

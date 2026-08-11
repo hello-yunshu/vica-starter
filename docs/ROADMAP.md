@@ -4,13 +4,14 @@
 
 > 先验证“可验证智能任务是否成立”，再建设平台；先有实验数据，再定义指标；先攻击 Challenge，再扩大生态。
 
-## 当前研究状态（v0.1.0 Freeze / v0.2.0 Benchmark Research）
+## 当前研究状态（v0.3.0 / Agent Benchmark）
 
 ### 版本定位
 
 ```text
 v0.1.0 = Research Integrity / Protocol Foundation Freeze
 v0.2.0 = Benchmark Research & External Evaluation
+v0.3.0 = Agent Benchmark（REPO-v0.1）
 ```
 
 v0.1.0 已冻结可信基础设施：deterministic verifier、challenge identity、
@@ -27,6 +28,14 @@ v0.2.0 转向研究 question：
 核心闭环：Prepare → Public Bundle → External Solver → Submission Bundle →
 Authoritative Verification → Result Bundle → Independent Reverification →
 Benchmark Research Report。
+
+v0.3.0 让 VICA 第一次真正评估 Coding Agent：
+
+> 给一个此前未知的小型代码仓库和任务，在有限时间、有限预算和未知隐藏测试下，
+> 一个计算系统能否产生正确、可验证、可复验的软件修改？
+
+通过新旗舰 `REPO-v0.1`（Workspace + Patch Candidate + Hidden Verifier +
+Agent Runner + NoOp/Reference controls + Strict Reverify）实现。
 
 ### 成熟度声明
 
@@ -233,6 +242,43 @@ docs/challenge-research/
 
 v0.2.0 明确**不**做：Server / FastAPI / Hosted Arena / Public API / Web UI /
 账号登录 / 在线排行榜 / Worker scheduler / P2P / Blockchain / Token / Wallet。
+
+---
+
+## v0.3.0 — Agent Benchmark
+
+将 Benchmark 从“只能评估算法 / 结构化答案”推进到“能够评估 Coding Agent”的
+Workspace / Patch 基准。
+
+交付：
+
+- REPO-v0.1 Challenge Family（`repo-v0.1`，generator `0.1.0`）
+  - Workspace（identity hash + safety）+ Patch Candidate（git unified diff）
+  - 6 个 task templates：`parser` / `cache` / `state_machine` / `serialization` /
+    `scheduler` / `storage`（`repair` + `implementation`）
+  - Secret-bound hidden verification（NoOp fail / Reference pass）
+- Evaluation / Submission / Result Bundle **v2** + Bundle Dispatcher（v1 兼容读取）
+- Agent Mode：`vica agent run / noop / reference`（`--pass-env` 显式转发，
+  verifier secret 永不透传）
+- REPO Verifier（sandbox 内运行 patched code，structural constraints +
+  public + hidden）+ 新 Failure Taxonomy
+- REPO Strict Reverify（绑定 workspace_hash + patch_hash）
+- REPO Research Lab（`docs/challenge-research/repo/`：threat-model / shortcut-audit /
+  task-validity / difficulty-calibration）
+
+成熟度声明：
+
+```text
+Protocol Core / Evaluation Bundles / Reverify   Stable
+REPO-v0.1                                       Stable（Released）
+CSP-v0.1                                        Stable/Baseline
+SYNTH-v0.1 / OPT-v0.1 / OS Sandbox              Experimental
+Hosted Service / Public Arena                   Not Implemented / Out of Scope
+```
+
+v0.3.0 明确**不**做：Server / Web UI / Public API / Hosted Arena / SaaS /
+Distributed Worker / Billing / Token / Wallet / Marketplace / WebSocket /
+远程数据库。
 
 ---
 

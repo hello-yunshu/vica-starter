@@ -378,6 +378,103 @@ def solver_run(
     typer.echo(f"out:           {summary['out']}")
 
 
+# ------------------------------------------------------------------ v0.3 agent
+
+
+agent_app = typer.Typer(
+    help="v0.3 Coding-Agent benchmark (REPO workspace, docs/SPEC.md 'Agent Mode')",
+    no_args_is_help=True,
+)
+app.add_typer(agent_app, name="agent")
+
+
+@agent_app.command("run")
+def agent_run(
+    bundle: Annotated[Path, typer.Option(help="evaluation bundle (public) directory")],
+    command: Annotated[str, typer.Option(help="agent command run once per REPO challenge")],
+    out: Annotated[Path, typer.Option(help="submission bundle output directory")],
+    system: Annotated[str, typer.Option(help="system id")] = "agent",
+    timeout: Annotated[float, typer.Option(help="per-task timeout (seconds)")] = 300.0,
+    pass_env: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--pass-env",
+            help="explicitly forward an env var name to the agent (repeatable; "
+            "verifier-reserved secrets are always rejected)",
+        ),
+    ] = None,
+) -> None:
+    """Run a Coding Agent once per REPO challenge and capture its patch."""
+    from vica.eval.agent_runner import run_agent
+
+    try:
+        summary = run_agent(
+            evaluation=bundle,
+            command=command,
+            out=out,
+            system_id=system,
+            timeout_s=timeout,
+            pass_env=pass_env,
+        )
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"evaluation id: {summary['evaluation_id']}")
+    typer.echo(f"system id:     {summary['system_id']}")
+    typer.echo(f"solved:        {summary['solved']}/{summary['expected']}")
+    typer.echo(f"failures:      {len(summary['failures'])}")
+    typer.echo(f"out:           {summary['out']}")
+
+
+@agent_app.command("noop")
+def agent_noop(
+    bundle: Annotated[Path, typer.Option(help="evaluation bundle (public) directory")],
+    out: Annotated[Path, typer.Option(help="submission bundle output directory")],
+    system: Annotated[str, typer.Option(help="system id")] = "noop",
+) -> None:
+    """NoOp baseline: submit an empty patch for every REPO challenge (§40)."""
+    from vica.eval.agent_runner import run_noop
+
+    try:
+        summary = run_noop(evaluation=bundle, out=out, system_id=system)
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"evaluation id: {summary['evaluation_id']}")
+    typer.echo(f"baseline:      {summary['baseline']}")
+    typer.echo(f"out:           {summary['out']}")
+
+
+@agent_app.command("reference")
+def agent_reference(
+    bundle: Annotated[Path, typer.Option(help="evaluation bundle (public) directory")],
+    out: Annotated[Path, typer.Option(help="submission bundle output directory")],
+    system: Annotated[str, typer.Option(help="system id")] = "reference",
+    verifier_secret: Annotated[
+        str | None,
+        typer.Option(
+            help="verifier secret (default: $VICA_VERIFIER_SECRET); evaluator/calibration only"
+        ),
+    ] = None,
+) -> None:
+    """Reference baseline: submit the authoritative patch for every challenge (§41)."""
+    from vica.eval.agent_runner import run_reference
+
+    try:
+        summary = run_reference(
+            evaluation=bundle,
+            out=out,
+            system_id=system,
+            verifier_secret=verifier_secret or "",
+        )
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"evaluation id: {summary['evaluation_id']}")
+    typer.echo(f"baseline:      {summary['baseline']}")
+    typer.echo(f"out:           {summary['out']}")
+
+
 # ------------------------------------------------------------------ v0.2 reverify
 
 
