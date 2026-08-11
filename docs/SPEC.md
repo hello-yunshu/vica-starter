@@ -1,7 +1,7 @@
-# VICA Protocol & Technical Specification v0.1 / v0.2
+# VICA Protocol & Technical Specification v0.1 → v0.3
 
-Status: v0.1 Frozen Core / v0.2.0 Released (Benchmark Research & External Evaluation)
-Scope: Local Arena + CSP-v0.1 / SYNTH-v0.1 / OPT-v0.1 + External Evaluation
+Status: v0.1 Frozen Core / v0.2.0 Release (Benchmark Research & External Evaluation) / v0.3.0 Release (Agent Benchmark)
+Scope: Local Arena + CSP-v0.1 / SYNTH-v0.1 / OPT-v0.1 / REPO-v0.1 + External Evaluation
 
 ---
 
@@ -885,3 +885,160 @@ vica reverify ...       -> 得到相同的 valid / score / error semantics
 ```
 
 这才是 v0.2 是否完成的真正判定标准。
+
+---
+
+## 18. v0.3 — Agent Benchmark (REPO-v0.1)
+
+> Agent 模式用户文档见 `docs/challenge-research/repo/`；本节是协议层增量。
+
+v0.3 让 VICA 第一次能够评估 **Coding Agent / Agentic LLM / Autonomous Repair
+System / Program Repair Algorithm / Human-written Patch**。统一研究问题：给一个
+此前未知的小型代码仓库和任务，在有限时间、有限预算和未知隐藏测试下，一个计算
+系统能否产生正确、可验证、可复验的软件修改。
+
+### 18.1 REPO-v0.1 Challenge
+
+新旗舰 challenge 类型 `repo-v0.1`（generator `0.1.0`）。内部用 `task_kind`
+区分语义，首版只支持：
+
+```text
+repair          修复真实 bug，保持接口，通过 public + hidden verifier
+implementation  补齐 TODO / incomplete behavior，不破坏已有行为
+```
+
+### 18.2 Workspace（新核心对象）
+
+每道 REPO challenge 携带一个小型 Python 仓库（workspace）：
+
+```text
+solution.py            # 待修复 / 待实现的 solve
+tests/test_public.py   # public 测试（不可变 protected path）
+task.md                # 任务描述
+```
+
+**Workspace identity** = SHA-256(canonical(sorted(relative_path, sha256(content),
+mode)))。排除 `.git/`、`__pycache__/`、`.pytest_cache/`、`.mypy_cache/`、
+`.ruff_cache/`、`.vica/`、`build/`、`dist/`。
+
+**Workspace safety** 拒绝绝对路径、`..`、symlink escape、device/FIFO/socket、
+nested `.git`（embedded repo）。根 `.git` 是 workspace 自身的 repo 目录，从
+identity 中排除但不拒绝。
+
+### 18.3 Patch Candidate
+
+REPO challenge 的 Candidate 是 **git unified diff patch artifact**：
+
+```text
+小 / 可审计 / 可保存 / 可重放 / 可 hash / 可第三方 reapply
+```
+
+限制：`MAX_PATCH_BYTES` / `MAX_CHANGED_FILES` / `MAX_CHANGED_LINES`。text patch
+only。不允许修改 `.git/`、`private/`、VICA evaluator、evaluation manifest；
+拒绝绝对路径、`..` traversal、symlink、binary patch。
+
+### 18.4 Secret-bound hidden verification
+
+延续 SYNTH 的 secret-bound 设计：reference patch 与 hidden tests 只从
+verifier secret 派生（HMAC-SHA256，domain-separated tag），绝不从 public
+`(seed, difficulty)` 派生。public tests 是 buggy == fixed 的输入（NoOp 通过，
+honest hint）；hidden tests 是 buggy != fixed 的输入（NoOp 失败，discriminating
+negative control）。
+
+### 18.5 REPO Verifier 流程
+
+```text
+authoritative pristine workspace -> validate workspace hash -> validate patch ->
+materialize to fresh temp dir（绝不修改原始 bundle）-> apply patch ->
+structural constraints -> public tests -> secret-derived hidden tests ->
+deterministic result
+```
+
+Untrusted patched code 在 `vica.sandbox` 中运行（resource limits、minimal env、
+clean cwd、bounded output）。我们直接调用 `solve` 而非 pytest，从而
+pytest-discovery / skip 类 shortcut 无法把失败伪装成成功。
+
+### 18.6 新 Failure Taxonomy
+
+区分：`NO_SUBMISSION` / `NO_CANDIDATE` / `TIMEOUT` / `PROCESS_FAILURE` /
+`PATCH_APPLY_FAILURE` / `STRUCTURAL_VIOLATION` / `PUBLIC_TEST_FAILURE` /
+`HIDDEN_TEST_FAILURE` / `INVALID_SOLUTION` / `SANDBOX_ERROR` / `INTERNAL_ERROR`。
+`ReportStatus` 保持克制，用 reason/failure_detail 补充。
+
+### 18.7 Bundle v2 与 Dispatcher
+
+为 Workspace Benchmark 建立 Evaluation/Submission/Result Bundle **v2**。原则：
+
+```text
+v1 artifacts -> 按 v1 reader 解释
+v2 artifacts -> 按 v2 reader 解释
+```
+
+禁止用 v2 语义静默重新解释 v1。通过 Bundle Dispatcher（`load_*_v1` /
+`load_*_v2` 注册表）路由，避免在大量代码中到处 `if version == ...`。
+
+### 18.8 Agent Mode
+
+新增 `vica agent`：
+
+```bash
+vica agent run \
+  --bundle <evaluation/public> \
+  --command "<agent command>" \
+  --out <submission> \
+  --system <system-id>
+```
+
+对每个 REPO challenge：copy public workspace → 在 scratch workspace 内运行
+Agent（cwd）→ Agent 编辑文件 → VICA 捕获 patch → 写 Submission Bundle →
+删除 scratch。Agent 输入只含 task description / public constraints / public
+tests / budget，绝不含 hidden tests / reference patch / verifier secret /
+private bundle / oracle output。
+
+**Agent Environment**：默认只继承安全 allowlist；Coding Agent 的 API Key 通过
+显式 `--pass-env OPENAI_API_KEY` / `--pass-env ANTHROPIC_API_KEY` 传入。永远
+禁止传 `VICA_VERIFIER_SECRET` / `VICA_PRIVATE_*`，即使误请求也拒绝。
+
+**Controls**：
+
+```text
+NoOp baseline     空 patch，必须 fail hidden（证明任务非原本通过）
+Reference baseline  权威 patch，必须 100% pass（evaluator/calibration only）
+public-only probe   满足 public 但 hidden 失败（验证 hidden 有区分力）
+```
+
+### 18.9 REPO Reverify
+
+第三方拥有 Evaluation Bundle + Verifier material + Result Bundle 后：
+load authoritative workspace → reapply stored patch → rerun structural checks →
+rerun public tests → regenerate same hidden tests → compare status/result。
+不调用 Solver。Reverify 必须绑定：evaluation id / workspace hash / patch hash /
+challenge id / generator version / verifier material commitment / task pack
+version / ReportStatus / score semantics。结果记录非 secret REPO 事实
+（`workspace_hash` / `patch_hash` / `patch_bytes` / `changed_files` /
+`changed_lines` / `task_kind`），绝不写 hidden tests / secret / reference patch。
+
+### 18.10 v0.3 CLI
+
+```text
+vica eval prepare
+vica eval inspect
+vica agent run
+vica eval verify
+vica reverify
+```
+
+现有 CSP/SYNTH/OPT CLI 必须继续工作。
+
+### 18.11 v0.3 判定标准
+
+```text
+P0 = 0, P1 = 0
+REPO E2E pass（repair + implementation）
+NoOp negative control
+Reference positive control
+shortcut audit implemented
+reverify works
+old v0.2 tests green
+版本 0.3.0
+```
