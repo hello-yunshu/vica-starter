@@ -49,3 +49,18 @@ hidden tests, the reference patch, or the verifier secret (§48). Strict reverif
 recomputes the authoritative REPO facts and binds `workspace_hash` + `patch_hash`
 so a tampered stored result is detected even when valid/score/status coincide
 (§50).
+
+## 5. Execution provenance (v0.4)
+
+The Result Bundle also records an **Execution Profile** (§63): runner backend,
+OS / architecture, Python version, dependency-environment hash, VICA version and
+git commit, runtime policies, and the **names** of any forwarded env vars. Only
+names are recorded — never values (§64). `OPENAI_API_KEY` may appear as a label,
+but its value and every other credential stay out of the bundle. The verifier
+secret is never forwarded to an agent and never written to any bundle; this is
+regression-tested.
+
+The Task Pack (`task_pack_id` / `task_pack_version` / `task_pack_hash`)
+identifies the exact task set a result covers, and strict reverify binds the
+hash so a result set that differs from the evaluation is refused (§50 / §59).
+See `docs/REPRODUCIBILITY.md`.

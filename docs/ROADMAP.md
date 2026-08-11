@@ -4,7 +4,7 @@
 
 > 先验证“可验证智能任务是否成立”，再建设平台；先有实验数据，再定义指标；先攻击 Challenge，再扩大生态。
 
-## 当前研究状态（v0.3.0 / Agent Benchmark）
+## 当前研究状态（v0.4.0 / Benchmark Validation & Reproducibility）
 
 ### 版本定位
 
@@ -12,6 +12,7 @@
 v0.1.0 = Research Integrity / Protocol Foundation Freeze
 v0.2.0 = Benchmark Research & External Evaluation
 v0.3.0 = Agent Benchmark（REPO-v0.1）
+v0.4.0 = Benchmark Validation & Reproducibility
 ```
 
 v0.1.0 已冻结可信基础设施：deterministic verifier、challenge identity、
@@ -277,6 +278,46 @@ Hosted Service / Public Arena                   Not Implemented / Out of Scope
 ```
 
 v0.3.0 明确**不**做：Server / Web UI / Public API / Hosted Arena / SaaS /
+Distributed Worker / Billing / Token / Wallet / Marketplace / WebSocket /
+远程数据库。
+
+---
+
+## v0.4.0 — Benchmark Validation & Reproducibility
+
+证明 v0.3 建立的 Agent Benchmark 具备可复验、可校准、抗明显 shortcut 的
+研究价值（而非只有“代码能跑”）。
+
+交付：
+
+- **Task Pack**：基准实例集的稳定、版本化身份（`task_pack_id` /
+  `task_pack_version` / `task_pack_hash`）；Result Bundle 记录三者，strict
+  reverify 绑定 hash。
+- **Execution Profile**：Result Bundle 记录环境 provenance（runner backend /
+  OS / arch / Python / 依赖环境 hash / VICA 版本 / git commit / 运行时策略 /
+  传递的 env **names**）；secret value 永不记录。
+- **Study**：`vica study run` — 多 system × task × replicate 简单嵌套循环，
+  聚合 success rate + Wilson CI、延迟、失败分类、按难度分层 metric；
+  replicate 属于 run identity。
+- **Golden compatibility fixtures**（`tests/fixtures/protocol/`：Bundle v1 + v2），
+  1.0 仍能加载历史 artifact 并 reverify。
+- **Benchmark validation**：reference positive control、NoOp negative control、
+  public-only overfit probe、seed generalization。
+- 新文档：`docs/REPRODUCIBILITY.md`、`docs/reports/repo-v0.1-validation.md`；
+  threat-model 补充 Execution provenance。
+
+成熟度声明：
+
+```text
+Protocol Core / Evaluation Bundles / Reverify       Stable
+REPO-v0.1 / Task Pack / Execution Profile / Study   Stable（v0.4）
+CSP-v0.1                                            Stable/Baseline
+SYNTH-v0.1 / OPT-v0.1 / OS Sandbox / Docker         Experimental
+外部 Coding Agent 实证校准                           Not Yet Established
+Hosted Service / Public Arena                       Not Implemented / Out of Scope
+```
+
+v0.4.0 明确**不**做：Server / Web UI / Public API / Hosted Arena / SaaS /
 Distributed Worker / Billing / Token / Wallet / Marketplace / WebSocket /
 远程数据库。
 

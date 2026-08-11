@@ -73,3 +73,40 @@ def test_report_missing_experiment_exits_nonzero(db_path: str) -> None:
     result = runner.invoke(app, ["report", "exp-does-not-exist", "--db", db_path])
     assert result.exit_code == 1
     assert "no runs found" in result.output
+
+
+def test_study_run_reference_noop(tmp_path) -> None:
+    """vica study run aggregates reference (pass) and noop (fail) over a REPO eval."""
+    from vica.eval.bundle import prepare_evaluation
+    from vica.repo.generator import TYPE_NAME
+
+    eval_dir = tmp_path / "eval"
+    prepare_evaluation(
+        challenge_type=TYPE_NAME,
+        difficulties=[1],
+        instances=1,
+        seed=11,
+        out=eval_dir,
+        verifier_secret="cli-study-secret",
+    )
+    systems_json = (
+        '[{"system_id":"reference","kind":"reference"},'
+        '{"system_id":"noop","kind":"noop"}]'
+    )
+    out_dir = tmp_path / "study"
+    result = runner.invoke(
+        app,
+        [
+            "study", "run",
+            "--evaluation", str(eval_dir),
+            "--out", str(out_dir),
+            "--systems", systems_json,
+            "--replicates", "1",
+            "--verifier-secret", "cli-study-secret",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "task pack id:  repo-v0.1-core" in result.output
+    assert "reference" in result.output
+    assert "noop" in result.output
+    assert (out_dir / "study.json").is_file()
