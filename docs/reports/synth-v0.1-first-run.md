@@ -15,6 +15,12 @@
 > 生成 / 验证 / 基线闭环是否工作，并初步观察难度区分度——尤其是设计文档中提出的
 > Risk 1（SYNTH-v0.1 能否被穷举求解）。
 
+> **历史实验状态（research-integrity note）**：本实验在 verifier-secret 隔离
+> （hidden-material isolation）落地前完成。当时隐藏测试可从公开的
+> `(seed, difficulty)` 确定性重建，因此**不能**将该实验视为 adversarial public
+> benchmark（对抗性公开基准）。它仅用于工程闭环验证。隐藏材料的 secret-派生隔离
+> 见 `docs/SPEC.md` "Verifier material" 与 `test_synth_generator.py`。
+
 ---
 
 ## 1. 汇总表

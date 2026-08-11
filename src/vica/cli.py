@@ -20,7 +20,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-DEFAULT_DB = Path("vica.db")
+# Default DB lives under a gitignored `.vica/` dir so a fresh clone does not
+# accumulate a runtime artifact in the repo root (see docs/SPEC.md "Storage").
+DEFAULT_DB = Path(".vica/vica.db")
 
 
 @app.command()
@@ -60,19 +62,27 @@ def benchmark(
         )
         raise typer.Exit(1)
 
-    difficulties = _parse_difficulties(difficulty)
+    try:
+        difficulties = _parse_difficulties(difficulty)
+    except ValueError as exc:
+        typer.echo(f"error: invalid difficulty spec {difficulty!r}: {exc}", err=True)
+        raise typer.Exit(1) from exc
     if not difficulties:
         typer.echo("error: no difficulties parsed", err=True)
         raise typer.Exit(1)
 
-    experiment_id = run_benchmark(
-        challenge_type=challenge,
-        difficulties=difficulties,
-        systems=requested,
-        instances=instances,
-        seed=seed,
-        db_path=str(db),
-    )
+    try:
+        experiment_id = run_benchmark(
+            challenge_type=challenge,
+            difficulties=difficulties,
+            systems=requested,
+            instances=instances,
+            seed=seed,
+            db_path=str(db),
+        )
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"experiment id: {experiment_id}")
     typer.echo("run 'vica report <experiment-id>' to see metrics.")
 
@@ -96,6 +106,7 @@ def report(
         typer.echo(f"no runs found for experiment {experiment_id}")
         raise typer.Exit(1)
 
+    from vica.arena.leaderboard import format_optional_metric
     from vica.arena.metrics import aggregate
 
     cells = aggregate(records)
@@ -105,8 +116,11 @@ def report(
             f"  {system_id:<10} d={difficulty:<3} "
             f"success={m.success_rate:.3f}  mean_ms={m.mean_solve_ms:8.1f}  "
             f"p50={m.p50_solve_ms:7.1f}  p95={m.p95_solve_ms:7.1f}  "
-            f"verify_us={m.mean_verify_us:6.1f}  cost=${m.total_cost_usd:.5f}  "
-            f"$/sol={m.cost_per_valid_solution:.5f}  SPD={m.valid_solutions_per_dollar:.2f}  "
+            f"verify_us={m.mean_verify_us:6.1f}  "
+            f"cost=${format_optional_metric(m.total_cost_usd, '.5f')}  "
+            f"$/sol={format_optional_metric(m.cost_per_valid_solution, '.5f')}  "
+            f"SPD={format_optional_metric(m.valid_solutions_per_dollar, '.2f')}  "
+            f"regret={format_optional_metric(m.mean_regret, '.4f')}  "
             f"SPS={m.valid_solutions_per_second:.2f}"
         )
 

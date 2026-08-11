@@ -1,7 +1,7 @@
 # VICA Protocol & Technical Specification v0.1
 
 Status: Draft  
-Scope: Local Arena + CSP-v0.1
+Scope: Local Arena + CSP-v0.1 / SYNTH-v0.1 / OPT-v0.1
 
 ---
 
@@ -103,6 +103,11 @@ metadata 默认是不可信自报数据。
 
 本地 Arena 中优先由 Runner 自动采集可测字段。
 
+**Cost 语义**：`estimated_cost_usd` 允许为 `null`（UNKNOWN / 未测量），
+**不等于** 0.0。只有确定知道为 0 时才写 0.0。任何依赖成本的派生指标
+（`$/valid`、`valid/$`、`quality/$`）在任一实例 cost 未知时输出 `N/A`
+（`None`），不得静默报告为 0。本地计算资源（CPU/GPU）成本尚未折算成美元。
+
 ---
 
 ## 4. Result
@@ -160,6 +165,8 @@ json.dumps(
 注意：
 
 正式跨语言协议发布前，需要对浮点数序列化做更严格约束。
+Protocol v0.1 canonical serialization 是 **Python-MVP 兼容**实现；跨语言数值
+canonicalization（如 JCS / RFC 8785）**尚未冻结**，不要宣称跨语言 Protocol 已最终稳定。
 
 ---
 
@@ -180,6 +187,9 @@ class ChallengeFamily(Protocol):
 
     def score(self, challenge: dict, candidate: Any) -> float:
         ...
+
+    def evaluate(self, challenge: dict, candidate: Any) -> EvaluationResult:
+        ...
 ```
 
 要求：
@@ -187,9 +197,15 @@ class ChallengeFamily(Protocol):
 - `generate` deterministic
 - `verify` deterministic
 - `score` deterministic
+- `evaluate` 是**单一 authoritative evaluation**：一次调用返回
+  `(valid, score, error_code)`，`verify_submission` 只调用它一次并复用结果，
+  避免对同一 candidate 重复验证/计分。
 - 不访问远程 API
 - 不依赖 LLM
 - 不依赖系统时间
+
+正确性（`valid`/`score`/`error_code`）对同一逻辑输入必须确定不变；
+`verify_time_us` 是 telemetry，同输入多次运行可能不同，不属于确定性声明。
 
 ---
 
@@ -219,6 +235,34 @@ class SolveOutput:
 - Hybrid Agent
 
 使用相同接口。
+
+### 7.1 Solver timeout 语义
+
+`solve()` 因资源受限（墙钟超时、子进程超时、CPU 预算耗尽）未产出 candidate 时，
+必须返回 `candidate=None` 并在 `metadata["status"]` 标记 `timeout`；
+**不得**把超时当作"模型答错"（`INVALID_SOLUTION` / 计入 success rate 的失败）。
+
+Runner 将 `status == "timeout"` 的 no-candidate 结果记录为 `ErrorCode.TIMEOUT`。
+
+### 7.2 LLM transport error 语义
+
+`llm-*` 系统的 transport 结果稳定映射为以下之一（`metadata["status"]`）：
+
+| status            | 含义                                                    |
+|-------------------|---------------------------------------------------------|
+| `success`         | HTTP 200 且 body 解析出 candidate                       |
+| `timeout`         | 显式超时（客户端 socket 超时或 HTTP 408/429/504）       |
+| `transport_error` | 网络层失败（DNS、连接拒绝等）                            |
+| `provider_error`  | HTTP 错误状态（非超时族）                                |
+| `parse_error`     | HTTP 200 但 body 无法解析出 candidate                    |
+| `no_candidate`    | 上述路径均未产出 candidate                              |
+
+- `status` 始终存在；`metadata["last_error"]` 仅在有可诊断错误时存在（否则为 `None`）。
+- `timeout` 不作为模型错误：Runner 记 `ErrorCode.TIMEOUT`（同 7.1）。
+- `transport_error` / `provider_error` 且无 candidate：Runner 记 `ErrorCode.INTERNAL_ERROR`，
+  **不**计入模型的 success-rate 失败。
+- `parse_error` / `no_candidate`：Runner 记 `ErrorCode.INVALID_SOLUTION`（模型未给出可验证解）。
+- 重试由 solver 明确定义并计数（`metadata["attempts"]`），Runner 不做隐式重试（见 §8）。
 
 ---
 
@@ -389,6 +433,23 @@ DIFFICULTY_PRESETS = {
 - GPU time
 - energy estimate
 
+### Optimization Challenge 质量指标（OPT-v0.1）
+
+对优化类 Challenge，合法解通常 `valid=True`，`success_rate` 无法区分解质量。
+评估质量时在实验分析层计算：
+
+```text
+raw score / optimal score / regret
+regret = optimal_score - candidate_score   （score 越大越好，最优 score 为最大值）
+```
+
+OPT-v0.1 的 `opt-dp` 为位掩码（Held-Karp 式）精确基准 O(n·2^n)，作为 optimal
+score 参照。不要把 `100% valid` 解释成 `100% solved optimally`。
+
+**Leaderboard 原则**：不把不同 Challenge Family（CSP success / SYNTH success /
+OPT mean_score）混成一个单一总分掩盖 trade-off；按 challenge / difficulty / metric
+分别展示。
+
 ---
 
 ## 12. 数据存储
@@ -409,13 +470,20 @@ payload_json
 created_at
 ```
 
-### systems
+### experiment_systems
 
 ```text
-id
+experiment_id
+system_id
 type
 config_json
+
+PRIMARY KEY (experiment_id, system_id)
 ```
+
+系统配置是 **experiment-scoped 快照**：每个实验保留自己的 resolved config，
+不同实验的相同 `system_id`（如 `llm` 使用不同 model）互不覆盖，历史实验保持
+可复现。
 
 ### runs
 
@@ -431,6 +499,11 @@ verify_time_us
 metadata_json
 created_at
 ```
+
+Schema 版本通过 `PRAGMA user_version` 管理（当前 `2`）。打开任意数据库
+（新建或 legacy v0.1）都会幂等地收敛到当前 schema：全部 DDL 使用
+`CREATE TABLE IF NOT EXISTS`，`experiment_systems` 为 v2 新增；历史
+`runs` 数据在迁移中原样保留。
 
 ---
 
@@ -449,13 +522,42 @@ created_at
 
 别人可以重新运行同一 experiment。
 
+实现上，Runner 把以上信息写入 `experiments` 表（`env_json` / `git_commit` /
+`vica_version` / `config_json`），并把每个 system 的解析后配置写入 `systems`
+表（`config_json`）。**不得保存 API Key / token / credential**。
+
+可复现性分级（不要宣称超出实际）：
+
+```text
+Challenge 复现           强：相同 (version, seed, difficulty) => 相同 payload
+传统 Solver 复现         较强：确定性算法 + 记录的 config
+远程模型实验复现          记录 model/config/provider/date；不保证远程模型未来 bit-identical
+```
+
+即使 `temperature=0`，商业 LLM API 也不保证长期 bit-identical，文档/报告必须如实说明。
+
 ---
 
 ## 14. 安全边界
 
 CSP-v0.1 不执行外部代码，因此风险较低。
 
-进入 Program Synthesis 后必须新增独立 sandbox 规格。
+SYNTH-v0.1 执行的是**受限纯 DSL 解释器**（无 `exec`、无 `eval`、无循环、无副作用），
+不会执行任意的 Python candidate 代码。解释器级守卫（长度/token/嵌套深度/求值步数/
+大整数位宽）在 `challenges/synth_v01/family.py` 中实现并映射到 `SANDBOX_ERROR`。
+
+OS 级沙箱（`src/vica/sandbox/`，Milestone M9）是**实验性 OS 资源隔离原型**，
+**不是**已硬化、可抵御恶意代码的隔离边界：
+
+- 子进程最小 allowlist 环境（不继承宿主 secrets）、进程组超时清理、CPU/输出/fd 上限：可用。
+- 输出是 **bounded streaming**：子进程独立进程组启动，stdout/stderr 通过
+  `select` 流式读取；一旦联合输出超过 `max_output_bytes` 立即 kill 整个进程组
+  （真正的输出资源上限，不是事后截断；截断只发生在进程已死亡后的残余读取）。
+- 内存上限（RLIMIT_AS/DATA）仅 Linux 生效（macOS fork 子进程继承约 400GiB 虚拟足迹）。
+- 网络命名空间 / read-only chroot：仅 Linux + root，默认关闭。
+
+因此 TASKS 中 M9 的 network/filesystem/memory/output/syscall 项保持
+`[ ]` 或 `[~] experimental`，不标 `[x]`。
 
 禁止在宿主 Python 进程中直接：
 
@@ -463,6 +565,50 @@ CSP-v0.1 不执行外部代码，因此风险较低。
 exec(candidate)
 eval(candidate)
 ```
+
+---
+
+## 14bis. Verifier Material 与 Solver-Visible Challenge
+
+SYNTH-v0.1 把数据明确分为两类：
+
+### Solver-Visible Challenge（Solver 可看到）
+
+```text
+challenge_id / type / generator_version / difficulty / seed(公共) / public payload
+public examples / budget
+```
+
+### Verifier-Only Material（Solver 正常执行路径不能得到）
+
+```text
+hidden test seed / hidden test vectors / reference target program / verifier secret
+```
+
+隔离机制：hidden tests 由
+`HMAC-SHA256(verifier_secret, f"{type}:{version}:hidden:{seed}:{difficulty}")`
+派生，reference target 由
+`HMAC-SHA256(verifier_secret, f"{type}:{version}:target:{seed}:{difficulty}")`
+派生（target 与 hidden 使用不同 tag，domain-separated）。Runner 每次 experiment 解析
+一个 verifier_secret（来自 `VICA_VERIFIER_SECRET`，或新生成写入 verifier-private 路径
+`<db所在目录>/private/<experiment>.material.json`，权限 0600；默认库 `.vica/vica.db`
+对应 `.vica/private/`）。**数据库实验中只保存材料的公开
+引用（`verifier_material_id` + `verifier_material_version`），绝不保存 secret 本身、绝不写入
+Challenge、绝不传给任何 Solver、不写入 solver-visible payload**。Solver 只拿到 public
+challenge，无法从公开 (seed, difficulty) 重建 target 或 hidden material。
+
+边界测试（`tests/test_synth_generator.py`）：
+
+- solver-visible challenge 不含 verifier secret / hidden tests / target program
+- 仅公开 seed 无法重建 hidden tests
+- 同 secret + 同 challenge => 相同 hidden material；不同 secret => 不同
+- 公开自检通过但权威 verifier（带 secret）拒绝的 overfit candidate
+
+> **注意**：若 Coding Agent 直接工作在仓库根目录（Development Mode），它天然可读
+> `src/`。面对真正 adversarial hidden benchmark 时，应把 verifier secret / hidden
+> tests / reference solution 移出 Agent 可读 workspace，使用 Evaluation Mode
+> （见 README "Security"）。Local Research Arena 的 v0.1 边界是"public challenge
+> 不含 verifier material"，不承诺"源码不可读"。
 
 ---
 

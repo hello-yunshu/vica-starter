@@ -8,10 +8,12 @@ families that execute arbitrary code (any language).
 Design (portable to macOS + Linux, no external deps):
 
 - Run the candidate in a fresh subprocess.
+- Child environment is a **minimal allowlist** (locale/encoding + PATH plus any
+  explicitly passed ``env``); host secrets are never inherited.
 - Apply resource limits via ``preexec_fn`` + :mod:`resource` so they are set
   *before* the payload runs:
     - RLIMIT_CPU   -> CPU time limit -> SIGXCPU
-    - RLIMIT_AS    -> memory limit   -> SIGKILL/SIGSEGV
+    - RLIMIT_AS    -> memory limit   -> best-effort (see below)
     - RLIMIT_NPROC -> process limit
     - RLIMIT_NOFILE-> file descriptor cap
     - RLIMIT_FSIZE -> output / file write cap
@@ -19,13 +21,27 @@ Design (portable to macOS + Linux, no external deps):
 - Start the child in its own process group (``start_new_session``) so a
   candidate that forks cannot escape a wall-clock timeout: we kill the whole
   group on timeout (cleanup after execution).
-- Bound stdout/stderr reads to ``max_output_bytes``.
+- Bound stdout/stderr with a **bounded streaming read** (:func:`select`):
+  once the combined output exceeds ``max_output_bytes`` the process group is
+  killed immediately — a real output resource limit, not post-hoc truncation.
 - Opportunistic hardening that is only applied when the platform/kernel allows
   it (never a hard failure on a normal dev machine):
     - network namespace disable (Linux + root, ``unshare(CLONE_NEWNET)``)
     - chroot to an empty read-only-ish scratch dir (Linux + root)
   When not available these are skipped with a warning; the rlimit + process
   group + output-bound guarantees always apply.
+
+Security status (M9, docs/TASKS.md): this is an **experimental OS resource
+isolation prototype**, NOT a hardened hostile-code boundary. The SYNTH-v0.1
+verifier uses an interpreter-level DSL guard (no exec) and never relies on this
+module for correctness. Known limits:
+
+- Memory: RLIMIT_AS reliably prevents a Linux child from over-allocating, but a
+  candidate that trips it usually exits with a CPython ``MemoryError`` (non-zero
+  exit code), which is indistinguishable from a user exit code 1. The sandbox
+  does **not** claim to detect "memory exhausted" precisely; it only guarantees
+  the child is bounded from completing.
+- Network/filesystem isolation are Linux+root gated and off by default.
 
 All violations map to deterministic ErrorCodes (SPEC section 4):
 TIMEOUT / SANDBOX_ERROR.
@@ -35,6 +51,7 @@ from __future__ import annotations
 
 import os
 import resource
+import select
 import signal
 import subprocess
 import sys
@@ -69,6 +86,33 @@ class SandboxLimits:
 
 class SandboxError(RuntimeError):
     """A sandbox constraint rejected the candidate."""
+
+
+# ---------------------------------------------------------------------- environment
+
+# Minimal allowlist of host variables a child may inherit. Everything else
+# (API keys, tokens, HOME, shells, etc.) is intentionally withheld so a
+# candidate cannot read host secrets. See docs/SPEC.md "Solver boundary".
+_ENV_ALLOWLIST = ("LANG", "LC_ALL", "LC_CTYPE", "PYTHONIOENCODING", "TZ")
+
+
+def _sandbox_env(env: dict[str, str] | None) -> dict[str, str]:
+    """Build the child environment from an allowlist, not the host copy.
+
+    Only the locale/encoding variables in ``_ENV_ALLOWLIST`` plus ``PATH``
+    (needed to exec the command) are inherited from the host. Any variable the
+    caller explicitly passes via ``env`` is layered on top. Host secrets are
+    never inherited by default.
+    """
+    base: dict[str, str] = {}
+    for key in _ENV_ALLOWLIST:
+        if key in os.environ:
+            base[key] = os.environ[key]
+    if "PATH" in os.environ:
+        base["PATH"] = os.environ["PATH"]
+    if env:
+        base.update(env)
+    return base
 
 
 # ---------------------------------------------------------------------- result
@@ -172,6 +216,93 @@ def __make_preexec(limits: SandboxLimits, scratch_dir: str | None) -> Any:
     return _preexec
 
 
+# ---------------------------------------------------------------------- bounded I/O
+
+
+def _drain_bounded(
+    proc: subprocess.Popen,
+    stdin_bytes: bytes | None,
+    wall_seconds: float,
+    max_output_bytes: int,
+) -> tuple[bytes, bytes, bool, bool]:
+    """Read stdout/stderr under a combined byte budget.
+
+    Returns ``(stdout, stderr, timed_out, overflow)``. This is a *real* output
+    bound, not post-hoc truncation: reading is streamed with :func:`select` and
+    stops as soon as the child's combined output exceeds *max_output_bytes*,
+    killing the whole process group (SIGKILL). A candidate therefore cannot
+    exhaust host memory by spewing output. The wall-clock deadline is enforced
+    the same way (kill group on timeout). ``stdin_bytes`` is written once and
+    the child's stdin is closed so a candidate reading stdin can proceed.
+    """
+    stdout_parts: list[bytes] = []
+    stderr_parts: list[bytes] = []
+    overflow = False
+    timed_out = False
+    total = 0
+
+    if stdin_bytes is not None and proc.stdin is not None:
+        try:
+            proc.stdin.write(stdin_bytes)
+        except (BrokenPipeError, ValueError):  # pragma: no cover - child exited
+            pass
+    if proc.stdin is not None:
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, ValueError, OSError):  # pragma: no cover
+            pass
+
+    streams: dict[int, list[bytes]] = {}
+    if proc.stdout is not None:
+        streams[proc.stdout.fileno()] = stdout_parts
+    if proc.stderr is not None:
+        streams[proc.stderr.fileno()] = stderr_parts
+    deadline = time.monotonic() + wall_seconds
+    while streams:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            ready, _, _ = select.select(list(streams), [], [], remaining)
+        except (OSError, ValueError):  # pragma: no cover - fd closed unexpectedly
+            break
+        if not ready:
+            timed_out = True
+            break
+        for fd in ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:  # pragma: no cover - fd closed by child exit
+                streams.pop(fd, None)
+                continue
+            if not chunk:  # EOF
+                streams.pop(fd, None)
+                continue
+            total += len(chunk)
+            if not overflow and total > max_output_bytes:
+                overflow = True
+                break  # stop reading once the budget is exceeded
+            streams[fd].append(chunk)
+        if overflow:
+            break
+
+    # On timeout / overflow we stopped early and must kill the child (and any
+    # forked descendants). On normal EOF the child has already closed its pipes;
+    # we still reap it so ``proc.returncode`` is available to the caller.
+    if timed_out or overflow or streams:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.wait()
+    except Exception:  # pragma: no cover - already reaped
+        pass
+
+    return b"".join(stdout_parts), b"".join(stderr_parts), timed_out, overflow
+
+
 # ---------------------------------------------------------------------- signal mapping
 
 
@@ -214,19 +345,13 @@ def run_sandboxed(
         else:  # pragma: no cover - docstring warns; degrade gracefully
             child_cwd = cwd
 
-    sandbox_env = os.environ.copy()
-    if env is not None:
-        sandbox_env.update(env)
-    # Minimal-ish environment: drop locale/user shell noise that a candidate
-    # could read to leak host info.
-    for key in ("HOME", "USER", "LOGNAME", "SHELL"):
-        sandbox_env.pop(key, None)
+    sandbox_env = _sandbox_env(env)
 
     timed_out = False
     launch_error = False
     returncode: int | None = None
-    stdout_chunks: list[bytes] = []
-    stderr_chunks: list[bytes] = []
+    stdout_bytes = b""
+    stderr_bytes = b""
     output_overflow = False
     wall_ms = 0.0
 
@@ -241,38 +366,20 @@ def run_sandboxed(
             start_new_session=True,
             preexec_fn=__make_preexec(limits, scratch_dir),
         )
-        try:
-            out, err = proc.communicate(
-                input=stdin.encode("utf-8") if stdin is not None else None,
-                timeout=limits.wall_seconds,
-            )
-            stdout_chunks.append(out)
-            stderr_chunks.append(err)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            # Cleanup: kill the whole process group so forked children die too.
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                out, err = proc.communicate()
-                if out:
-                    stdout_chunks.append(out)
-                if err:
-                    stderr_chunks.append(err)
-            except Exception:
-                pass
-        finally:
-            returncode = proc.returncode
+        stdout_bytes, stderr_bytes, timed_out, output_overflow = _drain_bounded(
+            proc,
+            stdin.encode("utf-8") if stdin is not None else None,
+            limits.wall_seconds,
+            limits.max_output_bytes,
+        )
+        returncode = proc.returncode
     except FileNotFoundError as exc:
         launch_error = True
         returncode = -1
-        stdout_chunks.append(b"")
-        stderr_chunks.append(str(exc).encode())
+        stderr_bytes = str(exc).encode()
     except Exception as exc:
         returncode = -1
-        stderr_chunks.append(f"sandbox internal error: {exc}\n".encode())
+        stderr_bytes = f"sandbox internal error: {exc}\n".encode()
     finally:
         wall_ms = (time.perf_counter() - start) * 1000.0
         if scratch_dir is not None:
@@ -283,12 +390,8 @@ def run_sandboxed(
             except Exception:
                 pass
 
-    stdout = _truncate(b"".join(stdout_chunks), limits.max_output_bytes)
-    stderr = _truncate(b"".join(stderr_chunks), limits.max_output_bytes)
-    if len(stdout_chunks) and len(b"".join(stdout_chunks)) > limits.max_output_bytes:
-        output_overflow = True
-    if len(stderr_chunks) and len(b"".join(stderr_chunks)) > limits.max_output_bytes:
-        output_overflow = True
+    stdout = _truncate(stdout_bytes, limits.max_output_bytes)
+    stderr = _truncate(stderr_bytes, limits.max_output_bytes)
 
     error_code: ErrorCode | None = None
     resource_violation = False

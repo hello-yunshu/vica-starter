@@ -38,11 +38,32 @@ def available_types() -> list[str]:
 
 
 def build_challenge(
-    type_name: str, seed: str, difficulty: int, *, generator_version: str | None = None
+    type_name: str,
+    seed: str,
+    difficulty: int,
+    *,
+    generator_version: str | None = None,
+    verifier_secret: str | None = None,
 ) -> Challenge:
-    """Generate a Challenge object with a canonical, deterministic id."""
+    """Generate a Challenge object with a canonical, deterministic id.
+
+    For families whose reference material is secret-bound
+    (``requires_verifier_secret``, currently SYNTH-v0.1), a solver-usable
+    challenge — including the public examples, whose expected outputs require
+    the reference target — can only be assembled by an authority holding the
+    verifier secret. Without it, only the public-generation part
+    (``family.generate``) is produced. The challenge payload never carries the
+    secret, the target, or the hidden tests; the authoritative verifier
+    reinjects the secret at verification time.
+    """
     family = get_family(type_name)
-    payload = family.generate(seed, difficulty)
+    if getattr(family, "requires_verifier_secret", False):
+        if verifier_secret is None:
+            payload = family.generate(seed, difficulty)
+        else:
+            payload, _ = family.generate_with_solution(seed, difficulty, verifier_secret)
+    else:
+        payload = family.generate(seed, difficulty)
     if generator_version is not None and generator_version != family.generator_version:
         raise ValueError(
             f"generator_version mismatch: requested {generator_version!r}, "
@@ -70,18 +91,22 @@ def verify_candidate(challenge: dict[str, Any], candidate: Any) -> tuple[bool, f
     """Run the family's deterministic verifier on a candidate dict.
 
     *challenge* is a plain dict carrying ``type``/``payload`` keys (the
-    dict-form of a Challenge). Returns (valid, score). Never raises on
-    malformed input.
+    dict-form of a Challenge). Intended for solver self-checks, so it runs on
+    public material only: it never carries the verifier secret, meaning SYNTH
+    hidden tests are not checked here. The authoritative arena verifier
+    (``verify_submission``) is the source of truth. Returns (valid, score).
+    Never raises on malformed input.
     """
     try:
         family = get_family(str(challenge["type"]))
-        # Pass the full challenge dict; families normalize internally so
-        # they can recover seed/difficulty when needed (e.g. SYNTH-v0.1).
+        if hasattr(family, "evaluate"):
+            result = family.evaluate(challenge, candidate)
+            return result.valid, result.score
         valid = family.verify(challenge, candidate)
         score = family.score(challenge, candidate) if valid else 0.0
+        return valid, score
     except Exception:
-        valid, score = False, 0.0
-    return valid, score
+        return False, 0.0
 
 
 __all__ = [

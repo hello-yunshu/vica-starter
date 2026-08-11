@@ -13,9 +13,13 @@ class RandomOrderSystem:
     """Random permutation; the absolute floor baseline."""
 
     system_id = "opt-random"
+    supported_challenge_types: frozenset[str] = frozenset({"opt-v0.1"})
 
     def __init__(self, seed: int = 0) -> None:
         self.seed = seed
+
+    def config(self) -> dict[str, Any]:
+        return {"seed": self.seed}
 
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         payload = challenge.get("payload", {})

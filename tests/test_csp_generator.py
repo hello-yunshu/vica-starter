@@ -41,6 +41,16 @@ def test_difficulty_scales_variable_count() -> None:
     assert list(counts.values()) == sorted(set(counts.values()))
 
 
+@pytest.mark.parametrize("difficulty", range(1, MAX_DIFFICULTY + 1))
+def test_constraint_count_always_exactly_matches_preset(difficulty: int) -> None:
+    """A seed sweep must never emit a weaker instance: len(constraints) always
+    equals the preset target count (SPEC 10, P1 CSP integrity)."""
+    _, expected_constraints = DIFFICULTY_PRESETS[difficulty]
+    for i in range(120):
+        payload = generate(f"integrity-sweep-{i}", difficulty)
+        assert len(payload["constraints"]) == expected_constraints
+
+
 def test_different_difficulties_never_same_payload() -> None:
     p1 = generate("seed", 1)
     p3 = generate("seed", 3)
