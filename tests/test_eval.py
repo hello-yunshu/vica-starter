@@ -770,7 +770,7 @@ def test_package_version_matches_pyproject() -> None:
 
     with open("pyproject.toml", "rb") as fh:
         pyproject = tomllib.load(fh)
-    assert vica.__version__ == pyproject["project"]["version"] == "0.2.0"
+    assert vica.__version__ == pyproject["project"]["version"] == "0.3.0"
 
 
 # ========================================== v0.2 final freeze regression tests

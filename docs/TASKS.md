@@ -553,3 +553,75 @@ exec(candidate)
 - [x] 确认无工作提示词、无 runtime DB 提交
 
 未完成项不得提前勾选。
+
+---
+
+# v0.3.0 — Agent Benchmark（REPO-v0.1）
+
+> v0.2.0 = Benchmark Research & External Evaluation
+> v0.3.0 = Agent Benchmark（REPO-v0.1）
+
+## Milestone R1 — REPO-v0.1 Family
+
+- [x] 从最新 `main` 创建 `work/v0.3-agent-benchmark`
+- [x] ROADMAP / TASKS / SPEC 版本定位更新（v0.3 Agent Benchmark）
+- [x] `repo-v0.1` Challenge Family（generator `0.1.0`，`task_kind`：
+      `repair` / `implementation`）
+- [x] Workspace 对象：identity hash（`workspace_hash`）+ safety（拒绝绝对路径 /
+      `..` / symlink escape / device/FIFO/socket / nested `.git`）
+- [x] Patch Candidate：git unified diff，`MAX_PATCH_BYTES` / `MAX_CHANGED_FILES` /
+      `MAX_CHANGED_LINES`，text-only
+- [x] 6 个 task templates：`parser` / `cache` / `state_machine` / `serialization` /
+      `scheduler` / `storage`（`repair` + `implementation`）
+- [x] Secret-bound hidden verification（HMAC-SHA256，domain-separated；public =
+      buggy==fixed，hidden = buggy!=fixed）
+- [x] 生成 >= 24 distinct benchmark instances（survey 120 实例，100 distinct
+      workspace hash；reference 100% pass / NoOp 100% hidden-fail）
+
+## Milestone R2 — Bundle v2 + Dispatcher
+
+- [x] Evaluation / Submission / Result Bundle **v2** 版本常量
+- [x] Bundle Dispatcher（`load_*_v1` / `load_*_v2`），v1 artifact 仍按 v1 reader
+      解释，不静默重解释
+- [x] `vica eval prepare` 支持 REPO（materialize workspace 于 public/）
+- [x] submission / result 的 bundle version 随 evaluation version 对齐
+
+## Milestone R3 — Agent Mode
+
+- [x] `vica agent run`：copy workspace → 在 scratch 内运行 Agent（cwd）→ 捕获
+      patch → 写 Submission Bundle → 删除 scratch
+- [x] `vica agent noop`（空 patch 基线，必须 fail hidden）
+- [x] `vica agent reference`（权威 patch 基线，必须 100% pass）
+- [x] Agent 环境 allowlist；`--pass-env` 显式转发；`VICA_VERIFIER_SECRET` /
+      `VICA_PRIVATE_*` 永不透传（即使误请求也拒绝）
+- [x] per-task timeout / nonzero exit / no patch / patch too large 区分，不全部
+      归为 NO_SUBMISSION
+
+## Milestone R4 — REPO Verifier + Reverify
+
+- [x] REPO Verifier 流程：validate workspace hash → validate patch → materialize
+      到 temp（绝不改原始）→ apply patch → structural → public → hidden →
+      deterministic result
+- [x] 新 Failure Taxonomy：`PATCH_APPLY_FAILURE` / `STRUCTURAL_VIOLATION` /
+      `PUBLIC_TEST_FAILURE` / `HIDDEN_TEST_FAILURE` 等
+- [x] patched code 在 `vica.sandbox` 运行（直接调用 `solve`，非 pytest）
+- [x] 结果记录非 secret REPO 事实（workspace_hash / patch_hash / patch_bytes /
+      changed_files / changed_lines / task_kind）
+- [x] REPO Strict Reverify 绑定 workspace_hash + patch_hash（tamper 检测）
+
+## Milestone R5 — Research Lab + CLI
+
+- [x] `docs/challenge-research/repo/`：README / threat-model / shortcut-audit /
+      task-validity / difficulty-calibration
+- [x] CLI：`vica eval prepare / inspect / verify`、`vica agent run / noop /
+      reference`、`vica reverify`
+
+## 测试与门禁
+
+- [x] Workspace / Patch / Hidden / Agent / Reverify 测试全部新增（`test_repo.py`）
+- [x] 回归门禁 PASS：`ruff check .` / `mypy src` / `pytest -q`（0.1/0.2 测试未删除）
+- [x] REPO E2E（repair + implementation）+ CSP/SYNTH/OPT regression
+- [x] 版本更新 0.3.0（pyproject / __init__ / SPEC / ROADMAP / TASKS / README /
+      README.zh-CN / CHANGELOG）
+
+未完成项不得提前勾选。
