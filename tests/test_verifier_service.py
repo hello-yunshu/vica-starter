@@ -177,3 +177,58 @@ def test_timing_is_excluded_from_deterministic_equality() -> None:
     assert len(semantics) == 1  # logical result identical across runs
     # timing may vary; at minimum it is a non-negative measurement, not semantics
     assert all(r.verify_time_us >= 0 for r in results)
+
+
+# --------------------------------------- P0-3: verifier-material binding
+
+
+def test_verifier_material_mismatch_is_internal_error_not_solver_failure() -> None:
+    """Verify(secret A) is valid; verify(secret B) on the same challenge must
+    NOT be reported as the solver's INVALID_SOLUTION — it is an evaluator
+    configuration failure (INTERNAL_ERROR), and hidden tests are skipped."""
+    from vica.challenges.synth_v01 import generate_with_solution
+
+    seed, difficulty = "material-mismatch", 2
+    challenge = build_challenge(
+        "synth-v0.1", seed, difficulty, verifier_secret="secret-a"
+    )
+    assert challenge.verifier_material_commitment is not None
+    _, sol_a = generate_with_solution(seed, difficulty, "secret-a")
+    submission = CandidateSubmission(
+        challenge_id=challenge.id,
+        system_id="test",
+        candidate={"program": sol_a["target_program"]},
+        metadata={},
+    )
+    # Correct secret: the correct candidate is valid.
+    ok = verify_submission(challenge, submission, verifier_secret="secret-a")
+    assert ok.valid is True
+    assert ok.score == 1.0
+    assert ok.error_code is None
+    # Wrong secret: evaluator configuration failure, NEVER a solver wrong answer.
+    bad = verify_submission(challenge, submission, verifier_secret="secret-b")
+    assert bad.valid is False
+    assert bad.error_code is not ErrorCode.INVALID_SOLUTION
+    assert bad.error_code == ErrorCode.INTERNAL_ERROR
+    # Missing secret on a committed challenge is the same configuration failure.
+    missing = verify_submission(challenge, submission)
+    assert missing.valid is False
+    assert missing.error_code == ErrorCode.INTERNAL_ERROR
+
+
+def test_verifier_material_mismatch_direct_family_evaluate() -> None:
+    """The family itself must refuse mismatched material before hidden tests."""
+    from vica.challenges.synth_v01 import FAMILY, VERIFIER_SECRET_KEY, generate_with_solution
+
+    seed, difficulty = "material-mismatch-family", 2
+    challenge = build_challenge(
+        "synth-v0.1", seed, difficulty, verifier_secret="secret-a"
+    )
+    _, sol_a = generate_with_solution(seed, difficulty, "secret-a")
+    challenge_dict = challenge.model_dump()
+    challenge_dict[VERIFIER_SECRET_KEY] = "secret-a"
+    assert FAMILY.evaluate(challenge_dict, {"program": sol_a["target_program"]}).valid
+    challenge_dict[VERIFIER_SECRET_KEY] = "secret-b"
+    result = FAMILY.evaluate(challenge_dict, {"program": sol_a["target_program"]})
+    assert result.valid is False
+    assert result.error_code == ErrorCode.INTERNAL_ERROR

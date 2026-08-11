@@ -400,19 +400,32 @@ def test_runner_persists_experiment_scoped_configs(
     assert cfg_a != cfg_b
 
 
-def test_legacy_schema_migrates_and_preserves_runs(tmp_db: str) -> None:
-    """A legacy DB (no experiment_systems) opens, upgrades, and keeps runs."""
+def test_real_v0_schema_migrates_and_preserves_runs(tmp_db: str) -> None:
+    """The REAL legacy v0.1 schema (no env_json, no experiment_systems) opens,
+    upgrades in place, and keeps historical experiments/runs working.
+
+    The initial v0.1 release (origin/main ee61542) created:
+
+        experiments (id, created_at, config_json, git_commit, vica_version)
+
+    and had no ``experiment_systems`` table. A migration must add
+    ``experiments.env_json``, create ``experiment_systems``, and leave every
+    historical row untouched — and new writes must succeed afterwards.
+    """
     import sqlite3
 
     from vica.challenges.registry import build_challenge
 
-    # Build a legacy-schema DB: user_version=0, no experiment_systems table.
+    # Reproduce the real legacy schema exactly (PRAGMA user_version = 0).
     conn = sqlite3.connect(tmp_db)
     conn.executescript(
         """
         CREATE TABLE experiments (
-            id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
-            config_json TEXT NOT NULL, env_json TEXT, git_commit TEXT, vica_version TEXT
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            git_commit TEXT,
+            vica_version TEXT
         );
         CREATE TABLE challenges (
             id TEXT PRIMARY KEY, type TEXT NOT NULL, generator_version TEXT NOT NULL,
@@ -431,12 +444,13 @@ def test_legacy_schema_migrates_and_preserves_runs(tmp_db: str) -> None:
             solve_wall_time_ms REAL NOT NULL, verify_time_us INTEGER NOT NULL,
             error_code TEXT, metadata_json TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE INDEX idx_runs_experiment ON runs(experiment_id);
         """
     )
     ch = build_challenge("csp-v0.1", "legacy-seed", 1)
     conn.execute(
-        "INSERT INTO experiments (id, created_at, config_json, env_json, git_commit, vica_version) "
-        "VALUES ('exp-legacy','now','{}',NULL,NULL,NULL)"
+        "INSERT INTO experiments (id, created_at, config_json, git_commit, vica_version) "
+        "VALUES ('exp-legacy','now','{}','abc123','0.1.0')"
     )
     conn.execute(
         "INSERT INTO runs (experiment_id, challenge_id, challenge_type, generator_version, "
@@ -448,22 +462,53 @@ def test_legacy_schema_migrates_and_preserves_runs(tmp_db: str) -> None:
             "random", "{}", 1, 1.0, 1.5, 20, None, "{}",
         ),
     )
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version == 0
     conn.commit()
     conn.close()
 
-    # Opening with the new Storage upgrades schema and preserves historical runs.
+    # Opening with the current Storage migrates the real legacy DB.
     import vica.storage.db as dbmod
 
     storage = Storage(tmp_db)
-    version = storage.conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == dbmod._SCHEMA_VERSION
-    columns = {row[1] for row in storage.conn.execute("PRAGMA table_info(experiment_systems)")}
-    assert {"experiment_id", "system_id", "type", "config_json"} <= columns
+    assert storage.conn.execute("PRAGMA user_version").fetchone()[0] == dbmod._SCHEMA_VERSION
+    # env_json column exists on the migrated experiments table.
+    experiment_columns = {
+        row[1] for row in storage.conn.execute("PRAGMA table_info(experiments)")
+    }
+    assert "env_json" in experiment_columns
+    # experiment_systems exists with the current shape.
+    systems_columns = {
+        row[1] for row in storage.conn.execute("PRAGMA table_info(experiment_systems)")
+    }
+    assert {"experiment_id", "system_id", "type", "config_json"} <= systems_columns
+    # Historical experiment and runs are preserved unchanged.
+    legacy = storage.get_experiment("exp-legacy")
+    assert legacy is not None
+    assert legacy["git_commit"] == "abc123"
+    assert legacy["vica_version"] == "0.1.0"
+    assert "env_json" in legacy
     runs = storage.runs_to_records("exp-legacy")
     assert len(runs) == 1
     assert runs[0].system_id == "random"
     assert runs[0].valid is True
+    # New writes after the migration succeed (no "no column named env_json").
+    storage.save_experiment(
+        experiment_id="exp-new",
+        config={"challenge_type": "csp-v0.1"},
+        created_at="now",
+        git_commit=None,
+        vica_version="0.1.0",
+        environment={"os": "test"},
+    )
+    assert storage.get_experiment("exp-new")["env_json"] is not None
     storage.close()
+
+    # Reopening is idempotent: no error, no duplicate columns.
+    storage2 = Storage(tmp_db)
+    assert storage2.conn.execute("PRAGMA user_version").fetchone()[0] == dbmod._SCHEMA_VERSION
+    assert storage2.get_experiment("exp-legacy") is not None
+    storage2.close()
 
 
 def test_incompatible_challenge_system_pairing_fails_fast(tmp_db: str) -> None:

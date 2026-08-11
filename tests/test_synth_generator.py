@@ -314,6 +314,85 @@ def test_build_challenge_id_stable() -> None:
     assert a.generator_version == FAMILY.generator_version
 
 
+# ------------------------------------------------------------------ material commitment
+
+
+def test_commitment_is_deterministic_and_full_length() -> None:
+    """Same material version + same secret => same 64-hex SHA-256 commitment."""
+    from vica.verifier.material import verifier_material_commitment
+
+    a = verifier_material_commitment(TEST_SECRET)
+    b = verifier_material_commitment(TEST_SECRET)
+    assert a == b
+    assert len(a) == 64
+    # Full digest is the protocol commitment: never truncated for identity.
+    assert a != a[:16]
+
+
+def test_commitment_differs_per_secret() -> None:
+    """Different secrets => different commitments (and different material ids)."""
+    from vica.verifier.material import material_id, verifier_material_commitment
+
+    assert verifier_material_commitment("secret-a") != verifier_material_commitment("secret-b")
+    assert material_id("secret-a") != material_id("secret-b")
+
+
+def test_commitment_is_domain_separated() -> None:
+    """The commitment must not collide with an unsalted SHA-256 of the secret."""
+    import hashlib
+
+    from vica.verifier.material import verifier_material_commitment
+
+    expected = hashlib.sha256(TEST_SECRET.encode("utf-8")).hexdigest()
+    assert verifier_material_commitment(TEST_SECRET) != expected
+
+
+def test_challenge_carries_commitment_and_payload_has_no_secret() -> None:
+    """A secret-bound Challenge commits to its material publicly.
+
+    The commitment is part of the Challenge, but the secret itself, the
+    target program, and the hidden tests never are.
+    """
+    challenge = build_challenge(TYPE_NAME, "commit-seed", 3, verifier_secret=TEST_SECRET)
+    assert challenge.verifier_material_commitment is not None
+    assert len(challenge.verifier_material_commitment) == 64
+    assert TEST_SECRET not in challenge.model_dump_json()
+    # Ordinary families carry no commitment.
+    from vica.challenges.registry import build_challenge as _bc
+
+    csp = _bc("csp-v0.1", "commit-seed", 1)
+    assert csp.verifier_material_commitment is None
+
+
+def test_challenge_id_binds_material_commitment() -> None:
+    """Same (type, generator_version, seed, difficulty) with different verifier
+    material => different challenge_id (different benchmark instance)."""
+    a = build_challenge(TYPE_NAME, "binding-seed", 3, verifier_secret="secret-a")
+    b = build_challenge(TYPE_NAME, "binding-seed", 3, verifier_secret="secret-b")
+    assert a.seed == b.seed
+    assert a.difficulty == b.difficulty
+    assert a.generator_version == b.generator_version
+    assert a.verifier_material_commitment != b.verifier_material_commitment
+    assert a.id != b.id
+
+
+def test_full_identity_reproduces_same_challenge() -> None:
+    """Same version + seed + difficulty + secret => same payload, commitment,
+    and challenge_id (the reproducibility contract for secret-bound families)."""
+    a = build_challenge(TYPE_NAME, "repro-id", 2, verifier_secret=TEST_SECRET)
+    b = build_challenge(TYPE_NAME, "repro-id", 2, verifier_secret=TEST_SECRET)
+    assert a.payload == b.payload
+    assert a.verifier_material_commitment == b.verifier_material_commitment
+    assert a.id == b.id
+
+
+def test_public_only_challenge_has_no_commitment() -> None:
+    """The public-only skeleton (no secret) commits to nothing."""
+    skeleton = build_challenge(TYPE_NAME, "skeleton-seed", 2)
+    assert skeleton.verifier_material_commitment is None
+    assert "public_tests" not in skeleton.payload
+
+
 def test_difficulty_scales_operator_pool() -> None:
     """Higher difficulty unlocks more operators / depth."""
     d1 = DIFFICULTY_PRESETS[1]
