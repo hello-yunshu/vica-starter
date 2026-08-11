@@ -1,0 +1,470 @@
+"""Tests for the v0.2 Benchmark Research & External Evaluation protocol.
+
+Covers the whole closed loop — Evaluation Bundle, Submission Bundle,
+authoritative verification, Result Bundle, strict reverify, plus the
+statistics / failure-taxonomy math and the external command solver.
+
+The gate keeps every v0.1 Research-Integrity test green; nothing here
+relies on a real LLM or network.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+from vica.eval.bundle import (
+    load_public_challenges,
+    load_public_manifest,
+    prepare_evaluation,
+)
+from vica.eval.models import EvaluationFailure, ReportStatus
+from vica.eval.reverify import reverify_bundle
+from vica.eval.stats import (
+    cost_coverage,
+    failure_taxonomy,
+    latency_distribution,
+    paired_comparison,
+    wilson_interval,
+)
+from vica.eval.submission import build_submission_bundle
+from vica.eval.verify import load_result_bundle, verify_evaluation
+
+_SECRET_A = "test-secret-aaaa"
+_SECRET_B = "test-secret-bbbb"
+_PY = sys.executable
+
+
+def _prepare(
+    out: Path, *, family: str = "csp-v0.1", difficulty: list[int] | None = None,
+    instances: int = 2, seed: int = 1, secret: str | None = None,
+) -> None:
+    prepare_evaluation(
+        challenge_type=family,
+        difficulties=difficulty or [1],
+        instances=instances,
+        seed=seed,
+        out=out,
+        verifier_secret=secret,
+    )
+
+
+@pytest.fixture()
+def eval_csp(tmp_path: Path) -> Path:
+    prepare_evaluation(
+        challenge_type="csp-v0.1",
+        difficulties=[1, 2],
+        instances=3,
+        seed=42,
+        out=tmp_path / "eval",
+    )
+    return tmp_path / "eval"
+
+
+@pytest.fixture()
+def eval_synth(tmp_path: Path) -> Path:
+    prepare_evaluation(
+        challenge_type="synth-v0.1",
+        difficulties=[1],
+        instances=2,
+        seed=3,
+        out=tmp_path / "eval",
+        verifier_secret=_SECRET_A,
+    )
+    return tmp_path / "eval"
+
+
+# ------------------------------------------------------------------ helpful ds
+
+
+def _rows_for(evaluation: Path, valid_all: bool = True) -> list[dict]:
+    from vica.systems.synth.random_program import RandomProgramSystem
+
+    challenges = load_public_challenges(evaluation)
+    rows = []
+    for i, ch in enumerate(challenges):
+        if ch["type"] == "synth-v0.1":
+            out = RandomProgramSystem().solve(ch)
+            cand = out.candidate
+        else:
+            vars_ = ch["payload"].get("variables", [])
+            cand = {"assignment": {v: (i % 2 == 0) for i, v in enumerate(vars_)}}
+        rows.append({"challenge_id": ch["id"], "candidate": cand, "metadata": {"solver": "test"}})
+    return rows
+
+
+# ================================================================== evaluation
+
+
+def test_same_config_same_secret_same_challenges(tmp_path: Path) -> None:
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    prepare_evaluation(
+        challenge_type="synth-v0.1", difficulties=[1], instances=2, seed=1, out=a,
+        verifier_secret=_SECRET_A,
+    )
+    prepare_evaluation(
+        challenge_type="synth-v0.1", difficulties=[1], instances=2, seed=1, out=b,
+        verifier_secret=_SECRET_A,
+    )
+    assert [c["id"] for c in load_public_challenges(a)] == [
+        c["id"] for c in load_public_challenges(b)
+    ]
+
+
+def test_different_secret_different_challenge_ids(tmp_path: Path) -> None:
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    prepare_evaluation(
+        challenge_type="synth-v0.1", difficulties=[1], instances=2, seed=1, out=a,
+        verifier_secret=_SECRET_A,
+    )
+    prepare_evaluation(
+        challenge_type="synth-v0.1", difficulties=[1], instances=2, seed=1, out=b,
+        verifier_secret=_SECRET_B,
+    )
+    assert [c["id"] for c in load_public_challenges(a)] != [
+        c["id"] for c in load_public_challenges(b)
+    ]
+
+
+def test_public_bundle_contains_no_secret(eval_synth: Path) -> None:
+    public = eval_synth / "public"
+    text = (
+        (public / "manifest.json").read_text()
+        + (public / "challenges.jsonl").read_text()
+        + (public / "README.md").read_text()
+    )
+    for forbidden in [_SECRET_A, "verifier_secret", "target_program", "hidden_tests"]:
+        assert forbidden not in text, f"public bundle leaked {forbidden!r}"
+
+
+def test_public_private_commitment_match(eval_synth: Path) -> None:
+    pub = load_public_manifest(eval_synth)
+    priv = json.loads((eval_synth / "private" / "manifest.json").read_text())
+    assert pub["verifier_material_commitment"] == priv["verifier_material_commitment"]
+    assert pub["challenges_hash"] == priv["challenges_hash"]
+
+
+def test_manifest_hash_stable(tmp_path: Path) -> None:
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    prepare_evaluation(
+        challenge_type="csp-v0.1", difficulties=[1], instances=2, seed=9, out=a
+    )
+    prepare_evaluation(
+        challenge_type="csp-v0.1", difficulties=[1], instances=2, seed=9, out=b
+    )
+    ma = json.loads((a / "public" / "manifest.json").read_text())
+    mb = json.loads((b / "public" / "manifest.json").read_text())
+    assert ma["manifest_hash"] == mb["manifest_hash"]
+
+
+def test_tampered_manifest_rejected(eval_csp: Path) -> None:
+    manifest_path = eval_csp / "public" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["challenge_count"] = 999
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(EvaluationFailure):
+        load_public_manifest(eval_csp)
+
+
+def test_tampered_challenge_rejected(eval_csp: Path) -> None:
+    challenges_path = eval_csp / "public" / "challenges.jsonl"
+    lines = challenges_path.read_text().splitlines()
+    # rewrite first line with a mutated difficulty
+    obj = json.loads(lines[0])
+    obj["difficulty"] = 5
+    lines[0] = json.dumps(obj)
+    challenges_path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(EvaluationFailure):
+        load_public_challenges(eval_csp)
+
+
+# ================================================================== submission
+
+
+def test_unknown_challenge_rejected(eval_csp: Path) -> None:
+    rows = _rows_for(eval_csp)
+    rows[0]["challenge_id"] = "does-not-exist"
+    with pytest.raises(EvaluationFailure):
+        build_submission_bundle(evaluation=eval_csp, system_id="s", rows=rows, out=eval_csp / "sub")
+
+
+def test_duplicate_challenge_rejected(eval_csp: Path) -> None:
+    rows = _rows_for(eval_csp)
+    rows.append(dict(rows[0]))
+    with pytest.raises(EvaluationFailure):
+        build_submission_bundle(evaluation=eval_csp, system_id="s", rows=rows, out=eval_csp / "sub")
+
+
+def test_missing_challenge_is_no_submission(eval_csp: Path) -> None:
+    rows = _rows_for(eval_csp)
+    build_submission_bundle(evaluation=eval_csp, system_id="s", rows=rows, out=eval_csp / "sub")
+    summary = verify_evaluation(
+        evaluation=eval_csp, submission=eval_csp / "sub", out=eval_csp / "res", system_id="s"
+    )
+    assert summary["no_submission"] == 0
+    # drop the last submission -> that challenge becomes NO_SUBMISSION
+    rows.pop()
+    build_submission_bundle(evaluation=eval_csp, system_id="s", rows=rows, out=eval_csp / "sub")
+    summary = verify_evaluation(
+        evaluation=eval_csp, submission=eval_csp / "sub", out=eval_csp / "res2", system_id="s"
+    )
+    assert summary["no_submission"] == 1
+
+
+def test_malformed_candidate_isolated(eval_csp: Path) -> None:
+    rows = _rows_for(eval_csp)
+    rows[0]["candidate"] = {"assignment": "not-a-dict"}
+    build_submission_bundle(evaluation=eval_csp, system_id="s", rows=rows, out=eval_csp / "sub")
+    summary = verify_evaluation(
+        evaluation=eval_csp, submission=eval_csp / "sub", out=eval_csp / "res", system_id="s"
+    )
+    # one malformed candidate does not discard the whole batch
+    assert summary["challenge_count"] == 6
+    results = [
+        json.loads(line)
+        for line in (eval_csp / "res" / "results.jsonl").read_text().splitlines()
+        if line
+    ]
+    assert results[0]["status"] == ReportStatus.PARSE_ERROR.value
+
+
+# ================================================================== verify
+
+
+def test_wrong_private_material_is_evaluator_error(tmp_path: Path) -> None:
+    ev = tmp_path / "ev"
+    evB = tmp_path / "evB"
+    prepare_evaluation(
+        challenge_type="synth-v0.1", difficulties=[1], instances=2, seed=3, out=ev,
+        verifier_secret=_SECRET_A,
+    )
+    prepare_evaluation(
+        challenge_type="synth-v0.1", difficulties=[1], instances=2, seed=3, out=evB,
+        verifier_secret=_SECRET_B,
+    )
+    rows = _rows_for(ev)
+    build_submission_bundle(evaluation=ev, system_id="s", rows=rows, out=tmp_path / "sub")
+    # swap public of evB with private of ev (create a mismatched pair)
+    import shutil
+
+    shutil.rmtree(evB / "public")
+    shutil.copytree(ev / "public", evB / "public")
+    with pytest.raises(EvaluationFailure):
+        verify_evaluation(evaluation=evB, submission=tmp_path / "sub", out=tmp_path / "res",
+                          system_id="s")
+
+
+@pytest.mark.parametrize("family", ["csp-v0.1", "synth-v0.1", "opt-v0.1"])
+def test_full_loop_all_families(tmp_path: Path, family: str) -> None:
+    ev = tmp_path / "ev"
+    secret = _SECRET_A if family == "synth-v0.1" else None
+    prepare_evaluation(
+        challenge_type=family, difficulties=[1], instances=2, seed=5, out=ev, verifier_secret=secret
+    )
+    challenges = load_public_challenges(ev)
+    rows = []
+    for ch in challenges:
+        if family == "synth-v0.1":
+            from vica.systems.synth.random_program import RandomProgramSystem
+
+            out = RandomProgramSystem().solve(ch)
+            rows.append({"challenge_id": ch["id"], "candidate": out.candidate, "metadata": {}})
+        elif family == "opt-v0.1":
+            rows.append({"challenge_id": ch["id"], "candidate": None, "metadata": {}})
+        else:
+            vars_ = ch["payload"].get("variables", [])
+            rows.append(
+                {
+                    "challenge_id": ch["id"],
+                    "candidate": {"assignment": {v: True for v in vars_}},
+                    "metadata": {},
+                }
+            )
+    build_submission_bundle(evaluation=ev, system_id="s", rows=rows, out=tmp_path / "sub")
+    verify_evaluation(evaluation=ev, submission=tmp_path / "sub", out=tmp_path / "res",
+                      system_id="s")
+    load_result_bundle(tmp_path / "res")
+    summary = reverify_bundle(tmp_path / "res", ev)
+    assert summary["ok"], summary["mismatches"]
+
+
+# ================================================================== result bundle
+
+
+def test_results_are_identical_on_reverify(eval_synth: Path, tmp_path: Path) -> None:
+    rows = _rows_for(eval_synth)
+    build_submission_bundle(evaluation=eval_synth, system_id="s", rows=rows, out=tmp_path / "sub")
+    verify_evaluation(evaluation=eval_synth, submission=tmp_path / "sub", out=tmp_path / "res",
+                      system_id="s")
+    bundle = tmp_path / "res"
+    orig = [
+        json.loads(line) for line in (bundle / "results.jsonl").read_text().splitlines() if line
+    ]
+    summary = reverify_bundle(bundle, eval_synth)
+    assert summary["ok"]
+    # valid/score/error_code must be identical (telemetry may differ)
+    recomputed_metrics = summary["metrics"]
+    assert recomputed_metrics["correctness"]["valid"] == sum(1 for r in orig if r["valid"])
+
+
+def test_result_bundle_has_no_secret(eval_synth: Path, tmp_path: Path) -> None:
+    rows = _rows_for(eval_synth)
+    build_submission_bundle(evaluation=eval_synth, system_id="s", rows=rows, out=tmp_path / "sub")
+    verify_evaluation(evaluation=eval_synth, submission=tmp_path / "sub", out=tmp_path / "res",
+                      system_id="s")
+    bundle = tmp_path / "res"
+    for f in bundle.iterdir():
+        if f.is_file():
+            assert _SECRET_A not in f.read_text(), f"result bundle leaked secret in {f.name}"
+
+
+def test_result_bundle_tamper_detected(eval_synth: Path, tmp_path: Path) -> None:
+    rows = _rows_for(eval_synth)
+    build_submission_bundle(evaluation=eval_synth, system_id="s", rows=rows, out=tmp_path / "sub")
+    verify_evaluation(evaluation=eval_synth, submission=tmp_path / "sub", out=tmp_path / "res",
+                      system_id="s")
+    bundle = tmp_path / "res"
+    with (bundle / "results.jsonl").open("a") as fh:
+        fh.write('{"challenge_id":"x","tampered":true}\n')
+    with pytest.raises(EvaluationFailure):
+        load_result_bundle(bundle)
+
+
+def test_reverify_refuses_wrong_evaluation(eval_synth: Path, tmp_path: Path) -> None:
+    rows = _rows_for(eval_synth)
+    build_submission_bundle(evaluation=eval_synth, system_id="s", rows=rows, out=tmp_path / "sub")
+    verify_evaluation(evaluation=eval_synth, submission=tmp_path / "sub", out=tmp_path / "res",
+                      system_id="s")
+    other = tmp_path / "other"
+    prepare_evaluation(
+        challenge_type="synth-v0.1", difficulties=[1], instances=2, seed=3, out=other,
+        verifier_secret=_SECRET_B,
+    )
+    with pytest.raises(EvaluationFailure):
+        reverify_bundle(tmp_path / "res", other)
+
+
+# ================================================================== statistics
+
+
+def test_wilson_zero_samples() -> None:
+    assert wilson_interval(0, 0) == (None, None)
+
+
+def test_wilson_edge_cases() -> None:
+    # 0/n and n/n are fine (clipped to [0,1])
+    lo, hi = wilson_interval(0, 5)
+    assert lo == 0.0 and 0 <= hi <= 1
+    lo, hi = wilson_interval(5, 5)
+    assert 0 <= lo <= 1 and hi == 1.0
+    # interior symmetric-ish
+    lo, hi = wilson_interval(72, 100)
+    assert lo < 0.72 < hi
+
+
+def test_latency_distribution() -> None:
+    d = latency_distribution([1, 2, 3, 4, 100])
+    assert d["mean"] == 22.0
+    assert d["p50"] == 3.0
+    assert d["p95"] is not None
+    assert latency_distribution([])["n"] == 0
+
+
+def test_cost_coverage_unknown_stays_unknown() -> None:
+    from vica.eval.models import ResultRecord
+
+    records = [
+        ResultRecord("a", "csp", "0.1", 1, "s", "sys", True, 1.0, ReportStatus.VALID, metadata={}),
+        ResultRecord(
+            "b", "csp", "0.1", 1, "s", "sys", True, 1.0, ReportStatus.VALID,
+            metadata={"estimated_cost_usd": 0.5},
+        ),
+    ]
+    out = cost_coverage(records)
+    assert out["known"] == 1 and out["total"] == 2
+    assert out["cost_coverage"] == 0.5
+
+
+def test_failure_taxonomy_by_difficulty() -> None:
+    from vica.eval.models import ResultRecord
+
+    records = [
+        ResultRecord("a", "csp", "0.1", 1, "s", "sys", True, 1.0, ReportStatus.VALID),
+        ResultRecord("b", "csp", "0.1", 1, "s", "sys", False, 0.0, ReportStatus.NO_SUBMISSION),
+        ResultRecord("c", "csp", "0.1", 2, "s", "sys", False, 0.0, ReportStatus.INVALID_SOLUTION),
+    ]
+    t = failure_taxonomy(records)
+    assert t["counts"][ReportStatus.VALID.value] == 1
+    assert t["by_difficulty"]["2"]["valid_rate"] == 0.0
+
+
+def test_paired_comparison() -> None:
+    from vica.eval.models import ResultRecord
+
+    def rec(cid: str, valid: bool, score: float) -> ResultRecord:
+        status = ReportStatus.VALID if valid else ReportStatus.INVALID_SOLUTION
+        return ResultRecord(cid, "csp", "0.1", 1, "s", "sys", valid, score, status)
+
+    a = {c: rec(c, True, float(i)) for i, c in enumerate(["c1", "c2", "c3"])}
+    b = {c: rec(c, True, float(i)) for i, c in enumerate(["c1", "c2", "c3"])}
+    b["c2"].score = 99.0  # B wins one
+    b["c3"].valid = False
+    b["c3"].status = ReportStatus.INVALID_SOLUTION
+    a["c4"] = rec("c4", False, 0.0)
+    b["c4"] = rec("c4", False, 0.0)  # both fail one
+    out = paired_comparison("A", a, "B", b)
+    assert out["compared"] == 4
+    assert out["a_wins"] == 1 and out["b_wins"] == 1 and out["tie"] == 1 and out["both_fail"] == 1
+
+
+# ================================================================== command solver
+
+
+def test_command_solver_valid_candidate(eval_csp: Path, tmp_path: Path) -> None:
+    from vica.eval.command_solver import solve_with_command
+
+    script = (
+        "import json,sys; ch=json.load(sys.stdin)['challenge']; "
+        "print(json.dumps({'challenge_id': ch['id'],'candidate': "
+        "{'assignment': {v: True for v in ch['payload'].get('variables',[])}},'metadata':{}}))"
+    )
+    summary = solve_with_command(
+        evaluation=eval_csp, command=f"{_PY} -c {script!r}", out=tmp_path / "sub", system_id="cmd"
+    )
+    assert summary["solved"] == 6
+
+
+def test_command_solver_malformed_output(eval_csp: Path, tmp_path: Path) -> None:
+    from vica.eval.command_solver import solve_with_command
+
+    summary = solve_with_command(
+        evaluation=eval_csp, command="echo not-json", out=tmp_path / "sub", system_id="cmd"
+    )
+    assert summary["solved"] == 0
+    assert len(summary["failures"]) == 6
+
+
+def test_command_solver_nonzero_exit(eval_csp: Path, tmp_path: Path) -> None:
+    from vica.eval.command_solver import solve_with_command
+
+    summary = solve_with_command(
+        evaluation=eval_csp, command="exit 3", out=tmp_path / "sub", system_id="cmd"
+    )
+    assert summary["solved"] == 0
+    assert summary["failures"][0]["error"] == "nonzero_exit"
+
+
+def test_command_solver_timeout(eval_csp: Path, tmp_path: Path) -> None:
+    from vica.eval.command_solver import solve_with_command
+
+    summary = solve_with_command(
+        evaluation=eval_csp, command="sleep 5", out=tmp_path / "sub", system_id="cmd", timeout_s=0.2
+    )
+    assert summary["solved"] == 0
+    assert summary["failures"][0]["error"] == "timeout"
