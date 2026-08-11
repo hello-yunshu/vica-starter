@@ -45,6 +45,9 @@ VICA is a local research arena. The following components exist today:
 | SQLite storage | Stable | Experiments, challenges, systems, runs |
 | Export / metrics | Stable | CSV / JSON export, aggregate metrics |
 | LLM adapter | Under Review | OpenAI-compatible API path (pricing optional) |
+| Evaluation Bundles | Stable | v1/v2 portable Evaluation / Submission / Result bundles |
+| Strict Reverify | Stable | Deterministic re-verification of a Result Bundle |
+| REPO-v0.1 | Stable | Agent Benchmark — coding-agent workspace + patch verification |
 | SYNTH-v0.1 | Experimental | Program-synthesis research (restricted DSL) |
 | OPT-v0.1 | Experimental | Continuous solution quality (scheduling) |
 | OS sandbox | Experimental | OS resource isolation prototype (see Security) |
@@ -111,9 +114,32 @@ VICA is a local research arena. The following components exist today:
 | CSP-v0.1 | Baseline | Infrastructure validation |
 | SYNTH-v0.1 | Experimental | Program-synthesis research |
 | OPT-v0.1 | Experimental | Continuous solution quality |
+| REPO-v0.1 | Stable | Agent Benchmark — workspace + patch verification |
 
 Difficulty levels are **preset parameter packs**, not claims of scientifically
 calibrated universal difficulty.
+
+---
+
+## Agent Benchmark (REPO-v0.1)
+
+VICA v0.3 can evaluate **coding agents** — not just algorithms and structured
+answers. A REPO challenge gives an agent a small Python repository and a task;
+the agent edits the workspace and VICA captures the edits as a git diff (patch),
+then verifies them deterministically against public + hidden tests.
+
+Controls ensure research validity:
+
+- NoOp baseline (empty patch) must fail hidden tests — no task is vacuously
+  passable.
+- Reference baseline (authoritative patch) must pass 100%.
+- Hidden tests are secret-derived and never shipped to the agent.
+- Strict reverify binds `workspace_hash` + `patch_hash` so tampered results are
+  caught.
+
+See `docs/challenge-research/repo/` for the threat model, shortcut audit, task
+validity, and difficulty calibration. This is a **local** runner; the sandbox is
+experimental local process isolation, not hardened hostile-code isolation.
 
 ---
 
@@ -149,6 +175,31 @@ vica report <experiment-id>
 The default database lives at `.vica/vica.db` (gitignored), so a fresh clone does
 not accumulate runtime artifacts in the repo root.
 
+### External Evaluation (REPO Agent Benchmark)
+
+```bash
+# 1. Prepare an Evaluation Bundle (public + private) for a REPO challenge.
+vica eval prepare --challenge repo-v0.1 --difficulty 1-3 --instances 24 --seed 42 --out ./bench \
+  --verifier-secret "$VICA_VERIFIER_SECRET"
+
+# 2. Run a coding agent once per challenge (edits the workspace; VICA captures the patch).
+vica agent run --bundle ./bench/public --command "codex ..." --out ./subs --system my-agent
+
+# 3. Baselines: NoOp must fail hidden; Reference must pass.
+vica agent noop      --bundle ./bench/public --out ./subs-noop
+vica agent reference --bundle ./bench/public --out ./subs-ref --verifier-secret "$VICA_VERIFIER_SECRET"
+
+# 4. Authoritatively verify a submission and write a Result Bundle.
+vica eval verify --evaluation ./bench --submission ./subs --out ./results --verifier-secret "$VICA_VERIFIER_SECRET"
+
+# 5. Strictly reverify the Result Bundle (no solver call).
+vica reverify ./results --evaluation ./bench --verifier-secret "$VICA_VERIFIER_SECRET"
+```
+
+> The agent's environment defaults to a safe allowlist. Forward a solver's own API
+> key explicitly with `--pass-env OPENAI_API_KEY`. Verifier-reserved secrets are
+> never forwarded, even if requested.
+
 ---
 
 ## Documentation
@@ -160,6 +211,8 @@ not accumulate runtime artifacts in the repo root.
 - [Roadmap](docs/ROADMAP.md)
 - [Implementation Tasks](docs/TASKS.md)
 - [Challenge Research Lab](docs/challenge-research/README.md)
+- [REPO-v0.1 Research Lab](docs/challenge-research/repo/README.md)
+- [Changelog](CHANGELOG.md)
 - Experiment reports: `docs/reports/`
 
 ---
