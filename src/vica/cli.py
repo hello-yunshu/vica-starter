@@ -106,6 +106,7 @@ def report(
         typer.echo(f"no runs found for experiment {experiment_id}")
         raise typer.Exit(1)
 
+    from vica.arena.leaderboard import format_optional_metric
     from vica.arena.metrics import aggregate
 
     cells = aggregate(records)
@@ -115,8 +116,10 @@ def report(
             f"  {system_id:<10} d={difficulty:<3} "
             f"success={m.success_rate:.3f}  mean_ms={m.mean_solve_ms:8.1f}  "
             f"p50={m.p50_solve_ms:7.1f}  p95={m.p95_solve_ms:7.1f}  "
-            f"verify_us={m.mean_verify_us:6.1f}  cost=${m.total_cost_usd:.5f}  "
-            f"$/sol={m.cost_per_valid_solution:.5f}  SPD={m.valid_solutions_per_dollar:.2f}  "
+            f"verify_us={m.mean_verify_us:6.1f}  "
+            f"cost=${format_optional_metric(m.total_cost_usd, '.5f')}  "
+            f"$/sol={format_optional_metric(m.cost_per_valid_solution, '.5f')}  "
+            f"SPD={format_optional_metric(m.valid_solutions_per_dollar, '.2f')}  "
             f"SPS={m.valid_solutions_per_second:.2f}"
         )
 

@@ -31,6 +31,7 @@ class SystemMetrics:
     attempts: list[int] = field(default_factory=list)
     tokens_in: int = 0
     tokens_out: int = 0
+    regrets: list[float] = field(default_factory=list)
 
     @property
     def success_rate(self) -> float:
@@ -39,6 +40,18 @@ class SystemMetrics:
     @property
     def mean_score(self) -> float:
         return self.score_sum / self.instances if self.instances else 0.0
+
+    @property
+    def mean_regret(self) -> float | None:
+        """Mean OPT regret over valid runs, or ``None`` when no regret data.
+
+        Regret = optimal_score - candidate_score (>= 0; 0 is optimal); it is
+        attached to valid OPT runs only. ``None`` means the cell has no OPT
+        regret information — surfaced as N/A, never as a misleading 0.
+        """
+        if not self.regrets:
+            return None
+        return statistics.fmean(self.regrets)
 
     @property
     def mean_solve_ms(self) -> float:
@@ -102,6 +115,21 @@ class SystemMetrics:
         return statistics.fmean(self.attempts) if self.attempts else 0.0
 
 
+def regret_quality(regret: float, reference: float) -> float:
+    """Experiment-relative normalized quality: ``1 - regret / reference``.
+
+    ``reference`` is the worst regret observed in the comparison set (e.g. the
+    worst run of any system in the same experiment). Quality is 1.0 for the
+    optimal solution (regret 0) and 0.0 at the reference regret, monotone
+    decreasing in regret. This is explicitly *experiment-relative*: it is not
+    an absolute quality bound and must be documented as such. Raises
+    ``ValueError`` when ``reference`` is not positive.
+    """
+    if reference <= 0:
+        raise ValueError("regret_quality: reference regret must be > 0")
+    return max(0.0, min(1.0, 1.0 - regret / reference))
+
+
 def aggregate(records: list[RunRecord]) -> dict[tuple[str, int], SystemMetrics]:
     """Aggregate raw runs into per-(system, difficulty) metrics."""
     cells: dict[tuple[str, int], SystemMetrics] = defaultdict(
@@ -126,6 +154,9 @@ def aggregate(records: list[RunRecord]) -> dict[tuple[str, int], SystemMetrics]:
         attempts = r.metadata.get("attempts")
         if isinstance(attempts, (int, float)):
             cell.attempts.append(int(attempts))
+        regret = r.metadata.get("regret")
+        if isinstance(regret, (int, float)) and not isinstance(regret, bool):
+            cell.regrets.append(float(regret))
         cell.tokens_in += int(r.metadata.get("input_tokens", 0) or 0)
         cell.tokens_out += int(r.metadata.get("output_tokens", 0) or 0)
     return dict(cells)

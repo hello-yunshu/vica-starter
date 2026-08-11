@@ -27,6 +27,7 @@ def leaderboard_rows(records: list[RunRecord]) -> list[dict]:
         acc.costs_usd.extend(cell.costs_usd)
         acc.cost_unknown_instances += cell.cost_unknown_instances
         acc.attempts.extend(cell.attempts)
+        acc.regrets.extend(cell.regrets)
         acc.tokens_in += cell.tokens_in
         acc.tokens_out += cell.tokens_out
 
@@ -55,16 +56,22 @@ def leaderboard_rows(records: list[RunRecord]) -> list[dict]:
     return rows
 
 
-def _fmt(value: float | None, spec: str) -> str:
+def format_optional_metric(value: float | None, spec: str) -> str:
     """Format a metric, rendering UNKNOWN cost (``None``) as ``N/A``.
 
     Cost-derived metrics are ``None`` when any instance's cost is unknown
     (SPEC "Cost semantics"); they must surface as N/A, never crash the renderer
-    or be printed as a misleading 0/blank.
+    or be printed as a misleading 0/blank. Shared by the leaderboard and the
+    ``vica report`` CLI so both render identically.
     """
     if value is None:
         return "N/A"
     return f"{value:{spec}}"
+
+
+def _fmt(value: float | None, spec: str) -> str:
+    """Backwards-compatible alias of :func:`format_optional_metric`."""
+    return format_optional_metric(value, spec)
 
 
 def format_leaderboard(rows: list[dict]) -> str:
@@ -96,4 +103,4 @@ def format_leaderboard(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["format_leaderboard", "leaderboard_rows"]
+__all__ = ["format_leaderboard", "format_optional_metric", "leaderboard_rows"]
