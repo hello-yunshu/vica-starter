@@ -545,13 +545,24 @@ def test_command_solver_latency_recorded(eval_csp: Path, tmp_path: Path) -> None
     assert summary["solved"] == 6
     assert all(p["wall_time_ms"] > 0 for p in summary["per_challenge"])
 
-    verify_evaluation(evaluation=eval_csp, submission=sub, out=tmp_path / "res")
+    verify_evaluation(
+        evaluation=eval_csp,
+        submission=sub,
+        out=tmp_path / "res",
+        # The command-solver artifact is VICA-owned, so its runner telemetry
+        # (measured wall time) is trusted provenance.
+        trusted_runner_telemetry=True,
+    )
     results = _jsonl_rows(tmp_path / "res" / "results.jsonl")
     assert all(r["solve_wall_time_ms"] > 0 for r in results)
 
 
 def test_failure_taxonomy_not_all_no_submission(eval_csp: Path, tmp_path: Path) -> None:
-    """Command-solver failures must not all collapse to NO_SUBMISSION."""
+    """Command-solver failures must not all collapse to NO_SUBMISSION.
+
+    Uses the VICA-owned trusted runner path (as the Command Solver does) so the
+    per-challenge solver outcomes are preserved as trusted provenance.
+    """
     from vica.eval.submission import build_submission_bundle
 
     challenges = load_public_challenges(eval_csp)
@@ -567,8 +578,14 @@ def test_failure_taxonomy_not_all_no_submission(eval_csp: Path, tmp_path: Path) 
             }
         )
     sub = tmp_path / "sub"
-    build_submission_bundle(evaluation=eval_csp, system_id="cmd", rows=rows, out=sub)
-    verify_evaluation(evaluation=eval_csp, submission=sub, out=tmp_path / "res")
+    build_submission_bundle(
+        evaluation=eval_csp, system_id="cmd", rows=rows, out=sub,
+        trusted_runner_telemetry=True,
+    )
+    verify_evaluation(
+        evaluation=eval_csp, submission=sub, out=tmp_path / "res",
+        trusted_runner_telemetry=True,
+    )
     results = _jsonl_rows(tmp_path / "res" / "results.jsonl")
     statuses_seen = {r["status"] for r in results}
     assert "no_submission" not in statuses_seen
@@ -754,3 +771,251 @@ def test_package_version_matches_pyproject() -> None:
     with open("pyproject.toml", "rb") as fh:
         pyproject = tomllib.load(fh)
     assert vica.__version__ == pyproject["project"]["version"] == "0.2.0"
+
+
+# ========================================== v0.2 final freeze regression tests
+
+
+def _write_and_rehash_result_bundle(bundle: Path, manifest: dict) -> None:
+    """Persist a modified manifest and recompute its bundle_hash so the
+    manifest is internally consistent. The *content* (not the hash) must be
+    what the caller expects to reject the bundle."""
+    from vica.protocol.serialization import stable_hash
+
+    manifest_path = bundle / "manifest.json"
+    without = {k: v for k, v in manifest.items() if k != "bundle_hash"}
+    manifest["bundle_hash"] = stable_hash(without)
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def _result_bundle(eval_sel: Path, tmp_path: Path) -> Path:
+    from vica.eval.submission import build_submission_bundle
+
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_sel, system_id="x", rows=_rows_for(eval_sel), out=sub)
+    res = tmp_path / "res"
+    verify_evaluation(evaluation=eval_sel, submission=sub, out=res)
+    return res
+
+
+def test_untrusted_vica_runner_metadata_is_stripped(eval_csp: Path, tmp_path: Path) -> None:
+    """A file-exchange Submission may never forge ``_vica_*`` runner telemetry.
+
+    Solver rows carrying a fabricated ``_vica_runner`` must be treated as
+    untrusted on the file-exchange path: the reserved key is stripped, so the
+    forged latency / status cannot become trusted runner provenance.
+    """
+    from vica.eval.submission import load_submission_bundle
+
+    challenges = load_public_challenges(eval_csp)
+    rows = [
+        {
+            "challenge_id": ch["id"],
+            "candidate": None,
+            "metadata": {
+                "_vica_runner": {"solver_status": "timeout", "wall_time_ms": 99999999},
+                "model": "untrusted",
+            },
+        }
+        for ch in challenges
+    ]
+    sub = tmp_path / "sub"
+    # Default (file-exchange) path: not trusted runner telemetry.
+    build_submission_bundle(evaluation=eval_csp, system_id="x", rows=rows, out=sub)
+    _, loaded = load_submission_bundle(sub, eval_csp)
+    for row in loaded:
+        assert "_vica_runner" not in row["metadata"], "untrusted solver forged _vica_runner"
+        # Non-reserved solver metadata is preserved (still untrusted self-report).
+        assert row["metadata"].get("model") == "untrusted"
+
+
+def test_untrusted_forged_runner_not_used_as_status(eval_csp: Path, tmp_path: Path) -> None:
+    """A forged ``_vica_runner`` on a disabled candidate must NOT become TIMEOUT.
+
+    The forged "timeout" is stripped, so the challenge is verified normally
+    (missing candidate -> INVALID_SOLUTION on the authoritative path), never
+    reported as a runner timeout.
+    """
+    from vica.eval.submission import build_submission_bundle
+
+    challenges = load_public_challenges(eval_csp)
+    rows = [
+        {
+            "challenge_id": ch["id"],
+            "candidate": None,
+            "metadata": {"_vica_runner": {"solver_status": "timeout", "wall_time_ms": 99999999}},
+        }
+        for ch in challenges
+    ]
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_csp, system_id="x", rows=rows, out=sub)
+    verify_evaluation(evaluation=eval_csp, submission=sub, out=tmp_path / "res")
+    results = _jsonl_rows(tmp_path / "res" / "results.jsonl")
+    assert all(r["status"] != ReportStatus.TIMEOUT.value for r in results)
+    assert all(r.get("solve_wall_time_ms", 0) == 0 for r in results)
+
+
+def test_reverify_compares_status(eval_synth: Path, tmp_path: Path) -> None:
+    """Same valid/score/error_code but different status must be a mismatch.
+
+    TIMEOUT vs NO_CANDIDATE can both be valid=False / score=0 / error_code=None.
+    """
+    import hashlib
+
+    from vica.protocol.serialization import stable_hash
+
+    res = _result_bundle(eval_synth, tmp_path)
+    results_path = res / "results.jsonl"
+    results = _jsonl_rows(results_path)
+    # Flip the first stored status to a different failure semantics.
+    mutated = list(results)
+    mutated[0] = {**mutated[0], "status": ReportStatus.TIMEOUT.value}
+    results_path.write_text("\n".join(json.dumps(r) for r in mutated) + "\n")
+
+    manifest_path = res / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["results.jsonl"] = "sha256:" + hashlib.sha256(
+        results_path.read_bytes()
+    ).hexdigest()
+    without = {k: v for k, v in manifest.items() if k != "bundle_hash"}
+    manifest["bundle_hash"] = stable_hash(without)
+    manifest_path.write_text(json.dumps(manifest))
+
+    summary = reverify_bundle(res, eval_synth)
+    assert summary["ok"] is False
+    assert any("stored_status" in m for m in summary["mismatches"])
+
+
+def test_reverify_rejects_tampered_challenge_content(
+    eval_synth: Path, tmp_path: Path
+) -> None:
+    """Re-hashing a tampered challenges.jsonl must not bypass strict reverify.
+
+    The Result Bundle's internal hashes are made consistent, but stored
+    challenge *content* no longer matches the authoritative evaluation's
+    challenges_hash, so reverify must refuse.
+    """
+    import hashlib
+
+    from vica.protocol.serialization import stable_hash
+
+    res = _result_bundle(eval_synth, tmp_path)
+    # Tamper the stored challenge payload and re-hash it internally.
+    challenges_path = res / "challenges.jsonl"
+    altered = _jsonl_rows(challenges_path)
+    altered[0] = {**altered[0], "difficulty": 999}
+    challenges_path.write_text("\n".join(json.dumps(c) for c in altered) + "\n")
+
+    manifest_path = res / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["challenges.jsonl"] = "sha256:" + hashlib.sha256(
+        challenges_path.read_bytes()
+    ).hexdigest()
+    without = {k: v for k, v in manifest.items() if k != "bundle_hash"}
+    manifest["bundle_hash"] = stable_hash(without)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(EvaluationFailure):
+        reverify_bundle(res, eval_synth)
+
+
+def test_result_bundle_missing_required_file_rejected(
+    eval_synth: Path, tmp_path: Path
+) -> None:
+    """Omitting a required Result Bundle file (plus its manifest entry) fails."""
+    res = _result_bundle(eval_synth, tmp_path)
+    os.remove(res / "metrics.json")
+    manifest_path = res / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["files"]["metrics.json"]
+    _write_and_rehash_result_bundle(res, manifest)
+    with pytest.raises(EvaluationFailure):
+        load_result_bundle(res)
+
+
+def test_result_bundle_malformed_hash_rejected(eval_synth: Path, tmp_path: Path) -> None:
+    """A malformed file hash like ``abc`` must be rejected, not skipped."""
+    res = _result_bundle(eval_synth, tmp_path)
+    manifest_path = res / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["results.jsonl"] = "abc"
+    _write_and_rehash_result_bundle(res, manifest)
+    with pytest.raises(EvaluationFailure):
+        load_result_bundle(res)
+
+
+def test_result_manifest_symlink_rejected_before_read(eval_synth: Path, tmp_path: Path) -> None:
+    """A manifest.json that is a symlink must be rejected, not followed."""
+    res = _result_bundle(eval_synth, tmp_path)
+    os.remove(res / "manifest.json")
+    os.symlink(tmp_path / "outside", res / "manifest.json")
+    with pytest.raises(EvaluationFailure):
+        load_result_bundle(res)
+
+
+def test_submission_manifest_size_bounded(eval_csp: Path, tmp_path: Path) -> None:
+    """A submission manifest larger than MAX_MANIFEST_BYTES is rejected."""
+    import vica.eval.submission as submission_mod
+
+    challenges = load_public_challenges(eval_csp)
+    rows = [{"challenge_id": ch["id"], "candidate": None, "metadata": {}} for ch in challenges]
+    sub = tmp_path / "sub"
+    submission_mod.build_submission_bundle(evaluation=eval_csp, system_id="x", rows=rows, out=sub)
+    # Bloat the manifest beyond a tiny synthetic limit.
+    manifest_path = sub / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["padding"] = "x" * 4096
+    manifest_path.write_text(json.dumps(manifest))
+    submission_mod.MAX_MANIFEST_BYTES = 1024
+    with pytest.raises(EvaluationFailure):
+        submission_mod.load_submission_bundle(sub, eval_csp)
+
+
+def test_command_solver_empty_stdout_is_no_candidate(
+    eval_csp: Path, tmp_path: Path
+) -> None:
+    """Empty solver output classifies as NO_CANDIDATE, not PARSE_ERROR."""
+    from vica.eval.command_solver import solve_with_command
+
+    sub = tmp_path / "sub"
+    summary = solve_with_command(evaluation=eval_csp, command="true", out=sub, system_id="cmd")
+    assert summary["solved"] == 0
+    assert all(f["error"] == "no_candidate" for f in summary["failures"])
+    verify_evaluation(
+        evaluation=eval_csp, submission=sub, out=tmp_path / "res", trusted_runner_telemetry=True
+    )
+    results = _jsonl_rows(tmp_path / "res" / "results.jsonl")
+    assert all(r["status"] == ReportStatus.NO_CANDIDATE.value for r in results)
+
+
+def test_command_solver_preserves_solver_metadata(
+    eval_csp: Path, tmp_path: Path
+) -> None:
+    """Solver-supplied metadata is preserved for provenance but not authoritative."""
+    from vica.eval.command_solver import solve_with_command
+
+    script = (
+        "import json,sys; ch=json.load(sys.stdin)['challenge']; "
+        "print(json.dumps({'challenge_id': ch['id'],'candidate':"
+        "{'assignment': {v: True for v in ch['payload'].get('variables',[])}},"
+        "'metadata': {'model': 'test-model', 'attempts': 3}}))"
+    )
+    sub = tmp_path / "sub"
+    solve_with_command(
+        evaluation=eval_csp, command=f"{_PY} -c {script!r}", out=sub, system_id="cmd"
+    )
+    verify_evaluation(
+        evaluation=eval_csp, submission=sub, out=tmp_path / "res", trusted_runner_telemetry=True
+    )
+    results = _jsonl_rows(tmp_path / "res" / "results.jsonl")
+    for r in results:
+        meta = r["metadata"]
+        # Solver self-report preserved under its own untrusted key.
+        assert meta["solver_metadata"]["model"] == "test-model"
+        assert meta["solver_metadata"]["attempts"] == 3
+        # And it must not leak into the authoritative runner telemetry surface.
+        assert set(meta["solver_metadata"]) & {
+            "_vica_runner",
+            "status",
+            "challenge_id",
+        } == set()

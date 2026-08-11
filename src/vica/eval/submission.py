@@ -30,6 +30,18 @@ from vica.eval.models import SUBMISSION_BUNDLE_VERSION, EvaluationFailure
 
 MAX_SUBMISSION_LINE_BYTES = 1 << 20
 MAX_SUBMISSIONS = 100_000
+# Reserved metadata namespace. ``_vica_*`` keys are owned by VICA and must
+# never be accepted from an untrusted Submission Bundle (docs/protocol/BUNDLE.md
+# "Solver self-report vs runner telemetry").
+RESERVED_METADATA_PREFIX = "_vica_"
+MAX_MANIFEST_BYTES = 1 << 20
+
+
+def _strip_reserved(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Drop reserved ``_vica_*`` keys from untrusted solver metadata."""
+    return {
+        k: v for k, v in metadata.items() if not k.startswith(RESERVED_METADATA_PREFIX)
+    }
 
 
 def build_submission_bundle(
@@ -39,12 +51,19 @@ def build_submission_bundle(
     rows: list[dict[str, Any]],
     out: str | Path,
     system_metadata: dict[str, Any] | None = None,
+    trusted_runner_telemetry: bool = False,
 ) -> dict[str, Any]:
     """Create a Submission Bundle from raw solver rows.
 
     ``rows`` is a list of ``{"challenge_id", "candidate", "metadata"}``.
     Unknown / duplicate challenge ids are rejected (the bundle is invalid);
     missing challenges are recorded as NO_SUBMISSION at verify time.
+
+    ``trusted_runner_telemetry`` must be ``True`` only when the caller is a
+    VICA-owned execution path (the Command Solver) that genuinely measured the
+    ``_vica_*`` telemetry it is writing. For any external solver rows it must
+    stay ``False`` (default), in which case reserved ``_vica_*`` metadata keys
+    are stripped so an untrusted solver cannot forge runner provenance.
     """
     expected = load_public_challenges(evaluation)
     expected_ids = {ch["id"] for ch in expected}
@@ -77,6 +96,8 @@ def build_submission_bundle(
         metadata = row.get("metadata")
         if not isinstance(metadata, dict):
             metadata = {}
+        if not trusted_runner_telemetry:
+            metadata = _strip_reserved(metadata)
         normalized.append(
             {
                 "challenge_id": cid,
@@ -99,19 +120,30 @@ def build_submission_bundle(
 
 
 def load_submission_bundle(
-    submission: str | Path, evaluation: str | Path
+    submission: str | Path,
+    evaluation: str | Path,
+    trusted_runner_telemetry: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Load and validate a Submission Bundle against an evaluation.
 
     Returns ``(manifest, rows)``. Unknown challenge ids or duplicate ids raise
     ``EvaluationFailure`` (reject bundle). Missing challenges are *not* an
     error here — they become NO_SUBMISSION per-instance at verification.
+
+    ``trusted_runner_telemetry`` is ``False`` for the file-exchange read path
+    (default): reserved ``_vica_*`` metadata keys are stripped so a solver
+    cannot forge VICA runner provenance. Only a VICA-owned execution path may
+    opt in.
     """
     root = Path(submission).resolve()
     manifest_path = root / "manifest.json"
     lines_path = root / "submissions.jsonl"
     if not manifest_path.is_file() or not lines_path.is_file():
         raise EvaluationFailure(f"{root} is not a Submission Bundle (missing manifest/submissions)")
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise EvaluationFailure("submission manifest must be a regular file")
+    if manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise EvaluationFailure("submission manifest is too large")
 
     manifest = _read_json(manifest_path)
     if manifest.get("submission_bundle_version") != SUBMISSION_BUNDLE_VERSION:
@@ -157,6 +189,8 @@ def load_submission_bundle(
             if cid in seen:
                 raise EvaluationFailure(f"duplicate challenge id {cid!r} in submission")
             seen.add(cid)
+            if not trusted_runner_telemetry and isinstance(row.get("metadata"), dict):
+                row = {**row, "metadata": _strip_reserved(row["metadata"])}
             rows.append(row)
     return manifest, rows
 

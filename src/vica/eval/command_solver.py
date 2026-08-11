@@ -104,13 +104,25 @@ def solve_with_command(
                 "candidate": info["candidate"],
                 "metadata": {
                     "solver_command": command,
+                    # Solver-supplied metadata is an untrusted self-report. It is
+                    # preserved for provenance but kept under its own key so it can
+                    # never collide with the VICA-owned ``_vica_*`` telemetry below.
+                    "solver_metadata": info.get("solver_metadata") or {},
                     "_vica_runner": runner_meta,
                 },
             }
         )
 
     result = build_submission_bundle(
-        evaluation=evaluation, system_id=system_id, rows=rows, out=out
+        evaluation=evaluation,
+        system_id=system_id,
+        rows=rows,
+        out=out,
+        # This is a VICA-owned execution path: the wall time, exit code, and
+        # solver outcome below are genuinely measured by VICA, so the runner
+        # telemetry it writes is trusted provenance (unlike a file-exchange
+        # Submission which may not claim ``_vica_*`` keys).
+        trusted_runner_telemetry=True,
     )
     result["evaluation_id"] = evaluation_id
     result["solved"] = len([p for p in per_challenge if p["candidate"] is not None])
@@ -182,11 +194,20 @@ def _run_one(command: str, ch: dict[str, Any], timeout_s: float) -> dict[str, An
     obj, parse_error = _parse_candidate(result.stdout, expected_id)
     if parse_error is not None or obj is None:
         info["error"] = parse_error or "no_candidate"
-        info["solver_status"] = ReportStatus.PARSE_ERROR
+        # Empty output is a "no candidate" solver outcome, not a malformed
+        # protocol response (docs/BENCHMARK_METHODOLOGY.md "Failure taxonomy").
+        info["solver_status"] = (
+            ReportStatus.NO_CANDIDATE
+            if info["error"] == "no_candidate"
+            else ReportStatus.PARSE_ERROR
+        )
         return info
 
     info["exit_ok"] = True
     info["candidate"] = obj["candidate"]
+    # Preserve the solver's self-reported metadata (untrusted) for provenance.
+    solver_meta = obj.get("metadata")
+    info["solver_metadata"] = solver_meta if isinstance(solver_meta, dict) else {}
     return info
 
 
