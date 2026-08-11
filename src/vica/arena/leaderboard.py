@@ -48,6 +48,7 @@ def leaderboard_rows(records: list[RunRecord]) -> list[dict]:
                 "cost_per_valid_solution": _round_opt(m.cost_per_valid_solution, 6),
                 "valid_solutions_per_dollar": _round_opt(m.valid_solutions_per_dollar, 4),
                 "valid_solutions_per_second": round(m.valid_solutions_per_second, 4),
+                "mean_regret": _round_opt(m.mean_regret, 4),
                 "mean_attempts": round(m.mean_attempts, 2),
                 "tokens_in": m.tokens_in,
                 "tokens_out": m.tokens_out,
