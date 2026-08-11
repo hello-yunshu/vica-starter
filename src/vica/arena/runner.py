@@ -12,19 +12,32 @@ Per docs/SPEC.md section 8 the runner:
 
 The runner never modifies solver output, never uses an LLM judge, and does
 not implicitly retry (retries are a strategy decision of the system).
+
+Evaluation Mode boundary (docs/SPEC.md "Verifier material"): one verifier
+secret is authoritative per experiment. It is never written into a
+solver-visible challenge, never stored in the experiment database, and never
+passed to a solver. The database keeps only a public material reference
+(id + version); the secret itself lives in the verifier-private path
+(``.vica/private/``) or is provided by the evaluator via
+``VICA_VERIFIER_SECRET``. Adversarial evaluation must run solvers in a
+workspace that does not contain the verifier-private material.
 """
 
 from __future__ import annotations
 
+import hashlib
+import os
 import platform
 import secrets
 import subprocess
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from vica import __version__
+from vica.challenges.opt_v01.family import score_order
 from vica.challenges.registry import available_types, build_challenge
 from vica.protocol.models import (
     CandidateSubmission,
@@ -33,6 +46,7 @@ from vica.protocol.models import (
     RunRecord,
     SolveOutput,
 )
+from vica.protocol.serialization import canonical_json_bytes
 from vica.storage.db import Storage
 from vica.systems.llm.llm_solver import (
     LLMSolverSystem,
@@ -40,7 +54,7 @@ from vica.systems.llm.llm_solver import (
     SynthLLMOneShotSystem,
 )
 from vica.systems.opt.brute import BruteOptSystem
-from vica.systems.opt.dp import DpOptSystem
+from vica.systems.opt.dp import DpOptSystem, optimal_order
 from vica.systems.opt.edd import EddSystem
 from vica.systems.opt.random_order import RandomOrderSystem
 from vica.systems.random.random_search import RandomSearchSystem
@@ -63,9 +77,52 @@ SYSTEM_FACTORIES: dict[str, Any] = {
     "opt-dp": lambda: DpOptSystem(),
 }
 
+# Derivation scheme for secret-bound verifier material
+# (target seed + hidden test seed, HMAC-SHA256, domain-separated tags).
+VERIFIER_MATERIAL_VERSION = "synth-v0.1-hmac-sha256-target-hidden:v1"
+
 
 def available_systems() -> list[str]:
     return sorted(SYSTEM_FACTORIES)
+
+
+def supported_challenge_types(system_name: str) -> list[str]:
+    """Capability contract: which challenge types *system_name* can solve.
+
+    Systems declare ``supported_challenge_types``; the runner fail-fasts at
+    experiment start when a configured pairing is incompatible (a configuration
+    error, never recorded as a solver failure).
+    """
+    factory = SYSTEM_FACTORIES[system_name]
+    try:
+        system = factory()
+    except Exception as exc:
+        raise ValueError(
+            f"system {system_name!r} cannot be constructed: {exc} "
+            "(check environment configuration such as VICA_LLM_MODEL)"
+        ) from exc
+    supported = getattr(system, "supported_challenge_types", None)
+    if supported is None:
+        raise ValueError(
+            f"system {system_name!r} does not declare supported_challenge_types"
+        )
+    return sorted(supported)
+
+
+def _validate_pairings(challenge_type: str, systems: list[str]) -> None:
+    """Fail fast on incompatible (challenge_type, system) pairs.
+
+    An incompatible pairing is an experiment configuration error: no RunRecord
+    is written. Runs that produce INTERNAL_ERROR because a solver cannot even
+    interpret the challenge must not become official benchmark data.
+    """
+    for name in systems:
+        supported = supported_challenge_types(name)
+        if challenge_type not in supported:
+            raise ValueError(
+                f"system {name!r} does not support challenge {challenge_type!r}; "
+                f"supported: {supported}"
+            )
 
 
 def git_commit() -> str | None:
@@ -111,18 +168,59 @@ def _environment_manifest() -> dict[str, Any]:
     }
 
 
-def _save_system_configs(storage: Storage, systems: list[str]) -> None:
-    """Persist each system's resolved configuration into the systems table.
+def _save_system_configs(
+    storage: Storage, experiment_id: str, systems: list[str]
+) -> None:
+    """Persist each system's resolved configuration for one experiment.
 
-    Only safe, non-secret fields are recorded (SPEC "System config must be
-    persisted"). Credentials are never part of a system's ``config()``.
+    System configs are experiment-scoped (``experiment_systems`` table): every
+    experiment keeps its own resolved snapshot, so historical runs stay
+    reproducible and are never overwritten by a later experiment. Only safe,
+    non-secret fields are recorded (SPEC "System config must be persisted").
+    Credentials are never part of a system's ``config()``.
     """
     for name in systems:
         try:
             config = SYSTEM_FACTORIES[name]().config()
         except Exception as exc:  # pragma: no cover - defensive
             config = {"error": str(exc)}
-        storage.save_system(system_id=name, type_=name, config=config)
+        storage.save_system_config(
+            experiment_id=experiment_id, system_id=name, type_=name, config=config
+        )
+
+
+def _verifier_secret_for(db_path: str, experiment_id: str) -> tuple[str, str]:
+    """Resolve the experiment verifier secret and its public material id.
+
+    The evaluator may fix the secret via ``VICA_VERIFIER_SECRET`` (same secret
+    + same seed + same version => same target and hidden tests, enabling
+    cross-machine reproducibility). Otherwise a fresh secret is drawn and
+    persisted to the verifier-private path next to the database
+    (``<db>.private/<experiment_id>.material.json``, mode 0600). The secret is
+    never stored in the experiment database; only the material id/version are.
+    """
+    version = VERIFIER_MATERIAL_VERSION
+    secret = os.environ.get("VICA_VERIFIER_SECRET")
+    if secret:
+        material_id = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
+        return secret, material_id
+    secret = secrets.token_hex(32)
+    material_id = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
+    private_dir = Path(db_path).parent / "private"
+    private_dir.mkdir(parents=True, exist_ok=True)
+    material_path = private_dir / f"{experiment_id}.material.json"
+    material = {
+        "experiment_id": experiment_id,
+        "verifier_material_id": material_id,
+        "verifier_material_version": version,
+        "verifier_secret": secret,
+    }
+    material_path.write_text(canonical_json_bytes(material).decode("utf-8"))
+    try:
+        material_path.chmod(0o600)
+    except OSError:  # pragma: no cover - non-POSIX filesystems
+        pass
+    return secret, material_id
 
 
 def _all_difficulty_systems(difficulty_systems: dict[int, list[str]] | None) -> set[str]:
@@ -150,6 +248,10 @@ def run_benchmark(
     ``systems`` is the set that runs on every difficulty. ``difficulty_systems``
     overrides the system set for specific difficulties (e.g. drop an expensive
     baseline above a size threshold). Returns the experiment id.
+
+    Fail-fast: incompatible (challenge_type, system) pairs raise ``ValueError``
+    before anything is written — such a pairing is an experiment configuration
+    error, not a solver outcome, so no RunRecord is produced.
     """
     if challenge_type not in available_types():
         raise ValueError(
@@ -162,14 +264,11 @@ def run_benchmark(
     unknown = requested - set(available_systems())
     if unknown:
         raise ValueError(f"unknown system(s): {sorted(unknown)}; available: {available_systems()}")
+    _validate_pairings(challenge_type, sorted(requested))
 
     experiment_id = experiment_id or f"exp-{uuid.uuid4().hex[:12]}"
+    verifier_secret, material_id = _verifier_secret_for(db_path, experiment_id)
     storage = Storage(db_path)
-    # One verifier secret per experiment. It is stored in the experiment
-    # manifest (local DB) so the run is reproducible, but it is never written
-    # into a Challenge or passed to any solver. It authorizes the verifier to
-    # regenerate hidden material (docs/SPEC.md "Verifier material").
-    verifier_secret = secrets.token_hex(32)
     try:
         config = {
             "challenge_type": challenge_type,
@@ -178,7 +277,12 @@ def run_benchmark(
             "difficulty_systems": difficulty_systems,
             "instances": instances,
             "seed": seed,
-            "verifier_secret": verifier_secret,
+            # The active verifier secret is NEVER stored in the database. Only
+            # a public reference is kept; the secret lives in the verifier-
+            # private path (or is evaluator-provided via VICA_VERIFIER_SECRET).
+            # Solver workspaces must not contain the verifier-private material.
+            "verifier_material_id": material_id,
+            "verifier_material_version": VERIFIER_MATERIAL_VERSION,
         }
         storage.save_experiment(
             experiment_id=experiment_id,
@@ -189,7 +293,7 @@ def run_benchmark(
             environment=_environment_manifest(),
         )
         system_set = sorted(set(systems) | _all_difficulty_systems(difficulty_systems))
-        _save_system_configs(storage, system_set)
+        _save_system_configs(storage, experiment_id, system_set)
 
         start_all = time.perf_counter()
         for difficulty in difficulties:
@@ -198,13 +302,24 @@ def run_benchmark(
                 syss = difficulty_systems[difficulty]
             for i in range(instances):
                 challenge = build_challenge(
-                    challenge_type, f"{seed}:{difficulty}:{i}", difficulty
+                    challenge_type,
+                    f"{seed}:{difficulty}:{i}",
+                    difficulty,
+                    verifier_secret=verifier_secret,
                 )
                 storage.save_challenge(challenge, _utcnow())
+                # OPT-v0.1: the exact bitmask DP reference (O(n*2^n)) is
+                # computed once per challenge, not once per (challenge, system).
+                opt_reference = _opt_optimal_score(challenge)
 
                 for system_name in syss:
                     run = _run_one(
-                        storage, experiment_id, challenge, system_name, verifier_secret
+                        storage,
+                        experiment_id,
+                        challenge,
+                        system_name,
+                        verifier_secret,
+                        opt_reference=opt_reference,
                     )
                     storage.save_run(run, _utcnow())
 
@@ -218,12 +333,31 @@ def run_benchmark(
         storage.close()
 
 
+def _opt_optimal_score(challenge: Challenge) -> float | None:
+    """Exact optimal score for an OPT-v0.1 payload (deltas vs reference).
+
+    Uses the deterministic bitmask DP (``opt-dp``) as the optimal-score
+    reference; returns None for non-OPT challenges. The value is attached to
+    run metadata so metrics can compute regret without re-solving.
+    """
+    if challenge.type != "opt-v0.1":
+        return None
+    payload = challenge.payload
+    processing = payload.get("processing")
+    deadlines = payload.get("deadlines")
+    if not isinstance(processing, list) or not isinstance(deadlines, list):
+        return None
+    return float(score_order(processing, deadlines, optimal_order(processing, deadlines)))
+
+
 def _run_one(
     storage: Storage,
     experiment_id: str,
     challenge: Challenge,
     system_name: str,
     verifier_secret: str,
+    *,
+    opt_reference: float | None,
 ) -> RunRecord:
     """Solve one challenge with one system, returning a RunRecord.
 
@@ -259,10 +393,12 @@ def _run_one(
 
     candidate = output.candidate
     if candidate is None:
-        # Distinguish an explicit solver timeout from genuinely wrong/no
-        # candidate. A timeout is a resource outcome, not an invalid solution
-        # (SPEC "Solver timeout semantics").
-        if output.metadata.get("status") == "timeout":
+        # Distinguish an explicit solver timeout and provider/transport
+        # failures from genuinely wrong/no candidate (SPEC "Solver timeout
+        # semantics", "LLM transport error semantics"). Timeouts and provider
+        # errors are resource/transport outcomes, never "the model was wrong".
+        status = output.metadata.get("status")
+        if status == "timeout":
             return _failure_record(
                 experiment_id,
                 challenge,
@@ -271,6 +407,16 @@ def _run_one(
                 output.metadata,
                 solve_ms,
                 "solver timed out without producing a candidate",
+            )
+        if status in ("transport_error", "provider_error"):
+            return _failure_record(
+                experiment_id,
+                challenge,
+                system_name,
+                ErrorCode.INTERNAL_ERROR,
+                output.metadata,
+                solve_ms,
+                f"provider/transport failure without a candidate (status={status})",
             )
         return _failure_record(
             experiment_id,
@@ -282,13 +428,19 @@ def _run_one(
             "no candidate produced",
         )
 
+    metadata = dict(output.metadata)
+    if opt_reference is not None:
+        metadata["optimal_score"] = opt_reference
+
     submission = CandidateSubmission(
         challenge_id=challenge.id,
         system_id=system_name,
         candidate=candidate,
-        metadata=output.metadata,
+        metadata=metadata,
     )
     result = verify_submission(challenge, submission, verifier_secret=verifier_secret)
+    if result.valid and opt_reference is not None:
+        metadata["regret"] = opt_reference - result.score
 
     return RunRecord(
         experiment_id=experiment_id,
@@ -304,7 +456,7 @@ def _run_one(
         solve_wall_time_ms=solve_ms,
         verify_time_us=result.verify_time_us,
         error_code=result.error_code,
-        metadata=output.metadata,
+        metadata=metadata,
     )
 
 
@@ -339,7 +491,9 @@ def _failure_record(
 
 __all__ = [
     "SYSTEM_FACTORIES",
+    "VERIFIER_MATERIAL_VERSION",
     "available_systems",
     "git_commit",
     "run_benchmark",
+    "supported_challenge_types",
 ]

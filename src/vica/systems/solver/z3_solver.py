@@ -25,6 +25,7 @@ class Z3SolverSystem:
     """Z3-backed satisfiability baseline for CSP-v0.1 payloads."""
 
     system_id = "z3"
+    supported_challenge_types: frozenset[str] = frozenset({"csp-v0.1"})
 
     def __init__(self, timeout_ms: int = 5000) -> None:
         self.timeout_ms = timeout_ms

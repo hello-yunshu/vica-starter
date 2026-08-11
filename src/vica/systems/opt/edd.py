@@ -15,6 +15,7 @@ class EddSystem:
     """Order jobs by non-decreasing due date."""
 
     system_id = "opt-edd"
+    supported_challenge_types: frozenset[str] = frozenset({"opt-v0.1"})
 
     def config(self) -> dict[str, Any]:
         return {"strategy": "edd"}

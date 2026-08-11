@@ -30,15 +30,45 @@ from vica.protocol.models import SolveOutput
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_MAX_RETRIES = 1
+_DEFAULT_TEMPERATURE = 0.0
 
 # Allow overriding the HTTP transport (used by tests); not public API.
 HttpPost = Callable[[str, dict[str, Any], dict[str, str], float], tuple[int, str]]
+
+# Stable LLM outcome semantics (SPEC "LLM transport error semantics"):
+#   success          — HTTP 200 and the response body parsed into a candidate
+#   timeout          — explicit timeout (client socket timeout or HTTP 408/429/504)
+#   transport_error  — network-level failure (DNS, connection refused, ...)
+#   provider_error   — HTTP error status other than the timeout family
+#   parse_error      — HTTP 200 but the body could not be parsed into a candidate
+#   no_candidate     — nothing above produced a candidate
+LLM_STATUSES = (
+    "success",
+    "timeout",
+    "transport_error",
+    "provider_error",
+    "parse_error",
+    "no_candidate",
+)
+LLM_TIMEOUT_HTTP = (408, 429, 504)
+
+
+def classify_transport_status(status: int, text: str) -> str:
+    """Map an HTTP transport outcome to one of the stable LLM statuses."""
+    if status == 200:
+        return "success"
+    if status in LLM_TIMEOUT_HTTP:
+        return "timeout"
+    if status == 0:
+        return "timeout" if "timeout" in text.lower() else "transport_error"
+    return "provider_error"
 
 
 class LLMSolverSystem:
     """OpenAI-compatible LLM participant for any ChallengeFamily."""
 
     system_id = "llm"
+    supported_challenge_types: frozenset[str] = frozenset({"csp-v0.1"})
 
     def __init__(
         self,
@@ -86,6 +116,7 @@ class LLMSolverSystem:
             "provider": "openai-compatible",
             "model": self.model,
             "base_url": self.base_url,
+            "temperature": _DEFAULT_TEMPERATURE,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "input_price_per_mtok": self.input_price_per_mtok,
@@ -108,6 +139,7 @@ class LLMSolverSystem:
         output_tokens = 0
         attempts = 0
         last_error: str | None = None
+        transport_status = "no_candidate"
         start = time.perf_counter()
 
         candidate: Any = None
@@ -120,8 +152,9 @@ class LLMSolverSystem:
                 prompt=prompt,
                 timeout_seconds=self.timeout_seconds,
             )
-            if status != 200:
-                last_error = f"http_{status}"
+            transport_status = classify_transport_status(status, text)
+            if transport_status != "success":
+                last_error = f"http_{status}" if status else text.split(":", 1)[-1]
                 continue
             try:
                 data = json.loads(text)
@@ -130,9 +163,11 @@ class LLMSolverSystem:
                 input_tokens = int(usage.get("prompt_tokens", 0))
                 output_tokens = int(usage.get("completion_tokens", 0))
                 candidate = parse_candidate_json(content)
+                transport_status = "success"
                 break
             except (KeyError, IndexError, TypeError, ValueError) as exc:
                 last_error = f"parse:{type(exc).__name__}"
+                transport_status = "parse_error"
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         metadata = {
@@ -147,6 +182,7 @@ class LLMSolverSystem:
             ),
             "solve_wall_time_ms": elapsed_ms,
             "last_error": last_error or None,
+            "status": transport_status,
         }
         return SolveOutput(candidate=candidate, metadata=metadata)
 
@@ -343,7 +379,7 @@ def _chat_completion(
             {"role": "system", "content": system_content},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.0,
+        "temperature": _DEFAULT_TEMPERATURE,
     }
     if json_mode:
         payload_body["response_format"] = {"type": "json_object"}
@@ -359,8 +395,16 @@ def _chat_completion(
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", errors="replace")
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return 0, f"network_error: {type(exc).__name__}"
+    except TimeoutError as exc:
+        # Explicit client-side timeout — classified as `timeout`, not a generic
+        # transport error; the runner must not record it as a wrong answer.
+        return 0, f"network_error: timeout: {type(exc).__name__}"
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            return 0, "network_error: timeout"
+        return 0, f"network_error: {exc.reason!r}"
+    except OSError as exc:
+        return 0, f"network_error: {type(exc).__name__}: {exc}"
 
 
 # ------------------------------------------------------------------ synth LLM systems
@@ -375,6 +419,7 @@ class SynthLLMOneShotSystem:
     """
 
     system_id = "llm-one-shot"
+    supported_challenge_types: frozenset[str] = frozenset({"synth-v0.1"})
 
     def __init__(
         self,
@@ -422,6 +467,7 @@ class SynthLLMOneShotSystem:
             "provider": "openai-compatible",
             "model": self.model,
             "base_url": self.base_url,
+            "temperature": _DEFAULT_TEMPERATURE,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "input_price_per_mtok": self.input_price_per_mtok,
@@ -441,6 +487,7 @@ class SynthLLMOneShotSystem:
         output_tokens = 0
         attempts = 0
         last_error: str | None = None
+        transport_status = "no_candidate"
         start = time.perf_counter()
         program: str | None = None
         for _ in range(self.max_retries + 1):
@@ -455,8 +502,9 @@ class SynthLLMOneShotSystem:
                     "Output only an expression.",
                 json_mode=False,
             )
-            if status != 200:
-                last_error = f"http_{status}"
+            transport_status = classify_transport_status(status, text)
+            if transport_status != "success":
+                last_error = f"http_{status}" if status else text.split(":", 1)[-1]
                 continue
             try:
                 data = json.loads(text)
@@ -466,10 +514,14 @@ class SynthLLMOneShotSystem:
                 output_tokens = int(usage.get("completion_tokens", 0))
                 program = parse_synth_candidate(content)
                 if program:
+                    transport_status = "success"
+                    last_error = None
                     break
                 last_error = "parse:empty"
+                transport_status = "parse_error"
             except (KeyError, IndexError, TypeError, ValueError) as exc:
                 last_error = f"parse:{type(exc).__name__}"
+                transport_status = "parse_error"
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         metadata = {
@@ -484,6 +536,7 @@ class SynthLLMOneShotSystem:
             ),
             "solve_wall_time_ms": elapsed_ms,
             "last_error": last_error or None,
+            "status": transport_status,
         }
         candidate = {"program": program} if program else None
         return SolveOutput(candidate=candidate, metadata=metadata)
@@ -501,6 +554,7 @@ class SynthLLMAgentSystem:
     """
 
     system_id = "llm-agent"
+    supported_challenge_types: frozenset[str] = frozenset({"synth-v0.1"})
 
     def __init__(
         self,
@@ -550,6 +604,7 @@ class SynthLLMAgentSystem:
             "provider": "openai-compatible",
             "model": self.model,
             "base_url": self.base_url,
+            "temperature": _DEFAULT_TEMPERATURE,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "max_rounds": self.max_rounds,
@@ -570,6 +625,7 @@ class SynthLLMAgentSystem:
         output_tokens = 0
         attempts = 0
         last_error: str | None = None
+        transport_status = "no_candidate"
         completed_rounds = 0
         start = time.perf_counter()
         program: str | None = None
@@ -593,8 +649,9 @@ class SynthLLMAgentSystem:
                     "Output only an expression.",
                     json_mode=False,
                 )
-                if status != 200:
-                    last_error = f"http_{status}"
+                transport_status = classify_transport_status(status, text)
+                if transport_status != "success":
+                    last_error = f"http_{status}" if status else text.split(":", 1)[-1]
                     continue
                 try:
                     data = json.loads(text)
@@ -605,16 +662,21 @@ class SynthLLMAgentSystem:
                     candidate_prog = parse_synth_candidate(content)
                     if not candidate_prog:
                         last_error = "parse:empty"
+                        transport_status = "parse_error"
                         continue
                     if public_tests_ok(payload, candidate_prog):
                         program = candidate_prog
+                        transport_status = "success"
+                        last_error = None
                         break
                     # Self-check failed: build feedback from first failing example.
                     feedback = _first_failure(payload, candidate_prog)
+                    transport_status = "parse_error"
                     last_error = None
                     break
                 except (KeyError, IndexError, TypeError, ValueError) as exc:
                     last_error = f"parse:{type(exc).__name__}"
+                    transport_status = "parse_error"
             if program is not None:
                 break
 
@@ -632,6 +694,7 @@ class SynthLLMAgentSystem:
             ),
             "solve_wall_time_ms": elapsed_ms,
             "last_error": last_error or None,
+            "status": transport_status,
         }
         candidate = {"program": program} if program else None
         return SolveOutput(candidate=candidate, metadata=metadata)
@@ -663,6 +726,7 @@ __all__ = [
     "SynthLLMOneShotSystem",
     "build_csp_prompt",
     "build_synth_prompt",
+    "classify_transport_status",
     "parse_candidate_json",
     "parse_synth_candidate",
     "_chat_completion",

@@ -67,6 +67,7 @@ class BruteForceSynthSystem:
     """Enumerative program search; the traditional-solver baseline."""
 
     system_id = "synth-brute"
+    supported_challenge_types: frozenset[str] = frozenset({"synth-v0.1"})
 
     def __init__(
         self,

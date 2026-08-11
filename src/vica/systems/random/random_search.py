@@ -21,6 +21,7 @@ class RandomSearchSystem:
     """Pure random guessing; the absolute floor baseline."""
 
     system_id = "random"
+    supported_challenge_types: frozenset[str] = frozenset({"csp-v0.1"})
 
     def __init__(self, attempts: int = 2000, max_seconds: float = 10.0, seed: int = 0) -> None:
         self.attempts = attempts

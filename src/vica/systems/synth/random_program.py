@@ -28,6 +28,7 @@ class RandomProgramSystem:
     """Random AST generation; the floor baseline for SYNTH-v0.1."""
 
     system_id = "synth-random"
+    supported_challenge_types: frozenset[str] = frozenset({"synth-v0.1"})
 
     def __init__(
         self,
