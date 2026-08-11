@@ -12,11 +12,14 @@ from pathlib import Path
 from vica.protocol.models import Challenge, ErrorCode, RunRecord
 from vica.protocol.serialization import canonical_json_bytes
 
+_SCHEMA_VERSION = 2
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (
     id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
     config_json TEXT NOT NULL,
+    env_json TEXT,
     git_commit TEXT,
     vica_version TEXT
 );
@@ -33,6 +36,13 @@ CREATE TABLE IF NOT EXISTS systems (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     config_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS experiment_systems (
+    experiment_id TEXT NOT NULL,
+    system_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, system_id)
 );
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +75,23 @@ class Storage:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Idempotent schema migration via ``PRAGMA user_version``.
+
+        Legacy v0.1 databases have no ``experiment_systems`` table (system
+        configs lived in the global ``systems`` table and were overwritten by
+        later experiments). Opening any database — fresh or legacy — converges
+        on the current schema: all DDL is ``CREATE TABLE IF NOT EXISTS``, and
+        ``user_version`` is set to the current schema version. Historical runs
+        are never touched.
+        """
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         self.conn.executescript(_SCHEMA)
+        if version != _SCHEMA_VERSION:
+            self.conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -79,11 +105,22 @@ class Storage:
         created_at: str,
         git_commit: str | None,
         vica_version: str,
+        environment: dict | None = None,
     ) -> None:
+        # Canonical JSON rejects NaN/Infinity, keeping storage consistent with
+        # the protocol (SPEC "Data interchange").
         self.conn.execute(
             "INSERT OR REPLACE INTO experiments "
-            "(id, created_at, config_json, git_commit, vica_version) VALUES (?, ?, ?, ?, ?)",
-            (experiment_id, created_at, json.dumps(config), git_commit, vica_version),
+            "(id, created_at, config_json, env_json, git_commit, vica_version) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                experiment_id,
+                created_at,
+                canonical_json_bytes(config).decode("utf-8"),
+                canonical_json_bytes(environment or {}).decode("utf-8"),
+                git_commit,
+                vica_version,
+            ),
         )
         self.conn.commit()
 
@@ -108,7 +145,30 @@ class Storage:
     def save_system(self, system_id: str, type_: str, config: dict) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO systems (id, type, config_json) VALUES (?, ?, ?)",
-            (system_id, type_, json.dumps(config)),
+            (system_id, type_, canonical_json_bytes(config).decode("utf-8")),
+        )
+        self.conn.commit()
+
+    def save_system_config(
+        self, experiment_id: str, system_id: str, type_: str, config: dict
+    ) -> None:
+        """Persist one experiment's resolved system-config snapshot.
+
+        Configs are experiment-scoped (``experiment_systems``): a later
+        experiment with a different config never overwrites an earlier one,
+        so historical runs stay reproducible (SPEC "Reproducibility"). Only
+        non-secret config fields are recorded; credentials must not be part of
+        a system's ``config()``.
+        """
+        self.conn.execute(
+            "INSERT OR REPLACE INTO experiment_systems "
+            "(experiment_id, system_id, type, config_json) VALUES (?, ?, ?, ?)",
+            (
+                experiment_id,
+                system_id,
+                type_,
+                canonical_json_bytes(config).decode("utf-8"),
+            ),
         )
         self.conn.commit()
 
@@ -133,7 +193,7 @@ class Storage:
                 record.solve_wall_time_ms,
                 record.verify_time_us,
                 record.error_code.value if record.error_code else None,
-                json.dumps(record.metadata),
+                canonical_json_bytes(record.metadata).decode("utf-8"),
                 created_at,
             ),
         )
@@ -146,6 +206,26 @@ class Storage:
             "SELECT * FROM experiments WHERE id = ?", (experiment_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    def get_experiment_systems(self, experiment_id: str) -> list[dict]:
+        """Resolved system-config snapshots for one experiment.
+
+        Returns list of ``{"system_id", "type", "config"}`` in insertion
+        order for the given experiment.
+        """
+        rows = self.conn.execute(
+            "SELECT system_id, type, config_json FROM experiment_systems "
+            "WHERE experiment_id = ? ORDER BY system_id",
+            (experiment_id,),
+        ).fetchall()
+        return [
+            {
+                "system_id": row["system_id"],
+                "type": row["type"],
+                "config": json.loads(row["config_json"]),
+            }
+            for row in rows
+        ]
 
     def iter_runs(self, experiment_id: str):
         cur = self.conn.execute(

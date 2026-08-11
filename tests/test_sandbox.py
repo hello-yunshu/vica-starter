@@ -73,15 +73,61 @@ def test_output_limit_is_enforced() -> None:
     assert len(result.stdout) <= 1024
 
 
+def test_output_overflow_kills_the_child_not_just_truncates() -> None:
+    """A candidate that would run forever while spewing output must be killed
+    once the output budget is exceeded — real enforcement, not post-hoc
+    truncation. If the child were merely truncated and allowed to continue,
+    this would hang until the CPU limit fires instead of returning at once."""
+    limits = SandboxLimits(max_output_bytes=1024, wall_seconds=5.0, cpu_seconds=5.0)
+    code = "import sys\nwhile True:\n    sys.stdout.write('y' * 4096)"
+    result = run_sandboxed(_py(code), limits=limits)
+    assert result.error_code == ErrorCode.SANDBOX_ERROR
+    assert result.metadata["output_overflow"]
+    assert len(result.stdout) <= 1024
+
+
 def test_memory_limit_is_enforced() -> None:
     # RLIMIT_AS/DATA bound a Linux subprocess; on macOS a forked child inherits
     # a ~400GiB virtual footprint so the guard is Linux-only (CI covers it).
     if not sys.platform.startswith("linux"):
         pytest.skip("memory rlimit is enforced on Linux (see runner.py notes)")
+    # Control: a small allocation under a generous limit completes normally.
+    # This proves the tight limit below is what causes the failure.
+    ok = run_sandboxed(
+        _py("x = bytearray(4 * 1024 * 1024); print(len(x))"),
+        limits=SandboxLimits(memory_bytes=256 * 1024 * 1024, wall_seconds=10.0, cpu_seconds=10.0),
+    )
+    assert ok.ok
+    # The tight 64 MiB RLIMIT must prevent the 512 MiB allocation from
+    # completing — the run is bounded (not a hang) and does not succeed. The
+    # violation surfaces either as a signal (resource_violation) or as a CPython
+    # MemoryError -> non-zero exit; the portable sandbox does NOT claim to
+    # distinguish the two (see runner.py security-status note).
     limits = SandboxLimits(memory_bytes=64 * 1024 * 1024, wall_seconds=10.0, cpu_seconds=10.0)
     result = run_sandboxed(_py("x = bytearray(512 * 1024 * 1024)"), limits=limits)
-    assert result.error_code == ErrorCode.SANDBOX_ERROR
-    assert result.resource_violation
+    assert not result.timed_out
+    assert not result.ok
+    if result.resource_violation:
+        assert result.error_code == ErrorCode.SANDBOX_ERROR
+    else:
+        assert result.returncode != 0
+
+
+def test_host_secret_env_is_not_inherited() -> None:
+    """A candidate must not see host secrets by default (allowlist env)."""
+    code = "import os; print(os.environ.get('VICA_TEST_SECRET', 'MISSING'))"
+    result = run_sandboxed(_py(code))
+    assert result.ok
+    assert "MISSING" in result.stdout
+    assert "super-secret" not in result.stdout
+
+
+def test_explicit_env_is_forwarded() -> None:
+    """Caller-supplied env is layered onto the allowlist, not blocked."""
+    code = "import os; print(os.environ.get('VICA_ALLOWED_VAR', 'MISSING'))"
+    result = run_sandboxed(_py(code), env={"VICA_ALLOWED_VAR": "sentinel"})
+    assert result.ok
+    assert "sentinel" in result.stdout
 
 
 def test_broken_command_is_reported_not_lethal() -> None:

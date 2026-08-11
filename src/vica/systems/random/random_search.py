@@ -21,11 +21,19 @@ class RandomSearchSystem:
     """Pure random guessing; the absolute floor baseline."""
 
     system_id = "random"
+    supported_challenge_types: frozenset[str] = frozenset({"csp-v0.1"})
 
     def __init__(self, attempts: int = 2000, max_seconds: float = 10.0, seed: int = 0) -> None:
         self.attempts = attempts
         self.max_seconds = max_seconds
         self.seed = seed
+
+    def config(self) -> dict[str, Any]:
+        return {
+            "attempts": self.attempts,
+            "max_seconds": self.max_seconds,
+            "seed": self.seed,
+        }
 
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         from vica.challenges.registry import verify_candidate

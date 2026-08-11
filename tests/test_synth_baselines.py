@@ -13,15 +13,29 @@ from vica.challenges.registry import build_challenge
 from vica.protocol.models import SolveOutput
 from vica.systems.synth import BruteForceSynthSystem, RandomProgramSystem
 
+_DEV_SECRET = "test-verifier-secret"
+
+
+def _synth_challenge(seed: str, difficulty: int) -> dict:
+    """Solver-usable SYNTH challenge (assembled by the verifier authority).
+
+    The runner builds challenges with the experiment verifier secret; solvers
+    see the fully assembled payload (public examples with expected outputs)
+    but never the secret itself.
+    """
+    return build_challenge(
+        "synth-v0.1", seed, difficulty, verifier_secret=_DEV_SECRET
+    ).model_dump()
+
 
 @pytest.fixture()
 def challenge_d1() -> dict:
-    return build_challenge("synth-v0.1", "baseline-d1", 1).model_dump()
+    return _synth_challenge("baseline-d1", 1)
 
 
 @pytest.fixture()
 def challenge_d3() -> dict:
-    return build_challenge("synth-v0.1", "baseline-d3", 3).model_dump()
+    return _synth_challenge("baseline-d3", 3)
 
 
 def test_random_returns_solve_output(challenge_d1: dict) -> None:
@@ -48,7 +62,7 @@ def test_brute_solves_low_difficulty(challenge_d1: dict) -> None:
     """Brute-force must reliably solve d=1 (small linear targets)."""
     solved = 0
     for i in range(6):
-        ch = build_challenge("synth-v0.1", f"brute-d1-{i}", 1).model_dump()
+        ch = _synth_challenge(f"brute-d1-{i}", 1)
         out = BruteForceSynthSystem(max_nodes=11, max_candidates=100_000, max_seconds=8.0).solve(ch)
         if out.candidate is not None:
             solved += 1

@@ -10,9 +10,15 @@ no loops, no side effects):
     factor:= INT | var | '(' expr ')' | '-' factor
            | min(expr, expr) | max(expr, expr) | abs(expr)
 
-A challenge gives a function signature, 10 public (input -> output)
-examples, and a budget. The verifier regenerates the hidden tests from
-(seed, difficulty) at evaluation time — they are never distributed.
+A challenge gives a function signature, 10 public (input -> output) examples,
+and a budget. The reference target program and the hidden tests are both
+secret-bound: they are regenerated at evaluation time from
+(verifier_secret, seed, difficulty) and are never distributed. Public test
+*inputs* come from the public (seed, difficulty); the *expected outputs* are
+attached only by the verifier authority, because computing them requires the
+secret-bound target. Without the secret, neither the target program nor the
+hidden tests are derivable from the public material (docs/SPEC.md
+"Verifier material").
 
 Sandboxing for v0.1 is interpreter-level (no exec anywhere):
 - program length / token count caps
@@ -24,6 +30,8 @@ All caps are deterministic and map to SANDBOX_ERROR.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import random
 from dataclasses import dataclass
 from functools import lru_cache
@@ -31,9 +39,15 @@ from typing import Any
 
 from vica.protocol.models import ErrorCode
 from vica.protocol.serialization import stable_hash
+from vica.verifier.interfaces import EvaluationResult
 
 TYPE_NAME = "synth-v0.1"
 GENERATOR_VERSION = "0.1.0"
+
+# Verifier-only secret key injected into the challenge dict by the authoritative
+# verifier (verify_submission). Solver-facing challenge dicts never carry it, so
+# a solver cannot regenerate hidden tests. See docs/SPEC.md "Verifier material".
+VERIFIER_SECRET_KEY = "_verifier_secret"
 
 # ------------------------------------------------------------------ sandbox
 
@@ -70,14 +84,37 @@ class Preset:
     public_tests: int = 10
     hidden_tests: int = 40
     code_size: int = 200
+    # Difficulty calibration (d4+): reject targets that are effectively
+    # constant (trivial) or too small to pose a real search problem.
+    min_nodes: int = 0
+    reject_constant: bool = False
 
 
 DIFFICULTY_PRESETS: dict[int, Preset] = {
     1: Preset(("+", "-"), (), 2, 20),
     2: Preset(("+", "-", "*", "%"), (), 3, 20),
     3: Preset(("+", "-", "*", "%", "//", "min", "max"), (), 4, 20),
-    4: Preset(("+", "-", "*", "%", "//", "min", "max"), ("abs",), 5, 20),
-    5: Preset(("+", "-", "*", "%", "//", "min", "max"), ("abs", "neg"), 6, 20),
+    # d4/d5 calibrated: `abs` broadens the operator pool and inflates the share
+    # of small/constant targets, which made brute-force success rebound above
+    # d3. Enforcing a minimum target complexity (min_nodes) plus rejecting
+    # constant functions restores strict monotonic difficulty (see
+    # docs/reports/synth-v0.1-scale.md calibration section).
+    4: Preset(
+        ("+", "-", "*", "%", "//", "min", "max"),
+        ("abs",),
+        5,
+        20,
+        min_nodes=5,
+        reject_constant=True,
+    ),
+    5: Preset(
+        ("+", "-", "*", "%", "//", "min", "max"),
+        ("abs", "neg"),
+        6,
+        20,
+        min_nodes=7,
+        reject_constant=True,
+    ),
 }
 
 MAX_DIFFICULTY = max(DIFFICULTY_PRESETS)
@@ -423,20 +460,151 @@ def _sample_tests(
     return tests
 
 
+def _node_count(node: tuple[Any, ...]) -> int:
+    """Number of AST nodes; used to enforce minimum target complexity."""
+    kind = node[0]
+    if kind in ("num", "var"):
+        return 1
+    if kind in ("neg", "abs"):
+        return 1 + _node_count(node[1])
+    return 1 + _node_count(node[1]) + _node_count(node[2])
+
+
+def _is_effectively_constant(
+    target: tuple[Any, ...], params: list[str], rng: random.Random, width: int
+) -> bool:
+    """True if the target yields the same value on several random inputs.
+
+    Used to reject trivial constant targets (e.g. ``0 * 13`` or ``abs(15)``)
+    that would be solvable by copying a single output and carry no reasoning.
+    """
+    outputs: set[int] = set()
+    for _ in range(16):
+        inp = {p: rng.randint(-width, width) for p in params}
+        try:
+            outputs.add(eval_program(target, inp))
+        except (EvalError, SandboxLimit):
+            return False
+        if len(outputs) > 1:
+            return False
+    return True
+
+
+def _errors_on_public_inputs(
+    target: tuple[Any, ...], seed: str, difficulty: int
+) -> bool:
+    """True if the target raises on any public test input (div/mod by zero).
+
+    Public example outputs are computed from the target by the verifier
+    authority (``generate_with_solution``), and the public test inputs come
+    from the public RNG — a target that cannot evaluate on one of them would
+    make the challenge unassemblable. Such targets are rejected at sampling
+    time, so ``generate(seed, difficulty)``'s public inputs and the
+    authoritative payload's public tests are always the same vectors.
+    """
+    public = _public_payload(seed, difficulty)
+    for case in public["public_test_inputs"]:
+        try:
+            eval_program(target, dict(case["input"]))
+        except (EvalError, SandboxLimit):
+            return True
+    return False
+
+
 # ------------------------------------------------------------------ generation
 
 def _make_rng(seed: str, difficulty: int) -> random.Random:
-    return random.Random(f"{TYPE_NAME}:{GENERATOR_VERSION}:{seed}:{difficulty}")
+    """Deterministic PRNG for solver-visible public material (test inputs).
+
+    Keyed only by the public (seed, difficulty). It never samples the
+    reference target, so knowing this RNG cannot recover the target program.
+    """
+    return random.Random(f"{TYPE_NAME}:{GENERATOR_VERSION}:public:{seed}:{difficulty}")
+
+
+def _secret_rng(verifier_secret: str, tag: str, seed: str, difficulty: int) -> random.Random:
+    """Deterministic PRNG keyed by the verifier secret with a domain tag.
+
+    ``target_seed = HMAC-SHA256(verifier_secret, type:version:target:seed:difficulty)``
+    ``hidden_seed = HMAC-SHA256(verifier_secret, type:version:hidden:seed:difficulty)``
+
+    The ``target`` and ``hidden`` tags domain-separate the two streams: even
+    with the same secret, target material and hidden-test material never share
+    an RNG stream. Knowing only the public (seed, difficulty) — without the
+    secret — cannot reconstruct either stream.
+    """
+    tag_bytes = f"{TYPE_NAME}:{GENERATOR_VERSION}:{tag}:{seed}:{difficulty}".encode()
+    digest = hmac.new(verifier_secret.encode("utf-8"), tag_bytes, hashlib.sha256).hexdigest()
+    return random.Random(digest)
+
+
+def _target_rng(verifier_secret: str, seed: str, difficulty: int) -> random.Random:
+    """RNG for the reference target program (verifier-only)."""
+    return _secret_rng(verifier_secret, "target", seed, difficulty)
+
+
+def _hidden_rng(verifier_secret: str, seed: str, difficulty: int) -> random.Random:
+    """RNG for hidden test inputs (verifier-only).
+
+    Domain-separated from the target stream via the ``hidden`` tag.
+    """
+    return _secret_rng(verifier_secret, "hidden", seed, difficulty)
 
 
 @lru_cache(maxsize=4096)
-def _generate_all(
-    seed: str, difficulty: int,
-) -> tuple[dict[str, Any], str, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Deterministic generation core -> (payload, target_src, public, hidden).
+def _generate_target(
+    verifier_secret: str, seed: str, difficulty: int,
+) -> tuple[tuple[Any, ...], str]:
+    """Verifier-only reference target generation -> (target_ast, target_src).
 
-    Cached: the verifier regenerates hidden tests for every submission, and
-    generation is pure (seed, difficulty) -> tuple.
+    The target is sampled from a PRNG derived from the verifier secret, so the
+    public (seed, difficulty) alone can never recover it. This is the core of
+    the Research-Integrity boundary: a Coding Agent that can read this source
+    still cannot regenerate the reference program without the secret.
+    """
+    try:
+        preset = DIFFICULTY_PRESETS[difficulty]
+    except KeyError:
+        raise ValueError(
+            f"unsupported difficulty {difficulty}; supported: {sorted(DIFFICULTY_PRESETS)}"
+        ) from None
+
+    rng = _target_rng(verifier_secret, seed, difficulty)
+    params = list(_PARAM_POOL[difficulty])
+
+    for _ in range(50):
+        candidate_target = sample_program(
+            rng, params, preset.ops, preset.unary, preset.max_depth, preset.input_width
+        )
+        # Reject trivial targets (bare var/num): no operation means the
+        # challenge has no reasoning content and is solvable by copy.
+        if candidate_target[0] in ("num", "var"):
+            continue
+        # Reject targets that cannot evaluate on the fixed public test inputs
+        # (e.g. ``x // y`` with a zero divisor): the public examples would be
+        # unassemblable by the verifier authority.
+        if _errors_on_public_inputs(candidate_target, seed, difficulty):
+            continue
+        # Difficulty calibration filters (d4+): drop effectively-constant and
+        # too-small targets so difficulty stays strictly monotonic.
+        if preset.min_nodes and _node_count(candidate_target) < preset.min_nodes:
+            continue
+        if preset.reject_constant and _is_effectively_constant(
+            candidate_target, params, rng, preset.input_width
+        ):
+            continue
+        return candidate_target, program_to_source(candidate_target)
+    raise RuntimeError("synth-v0.1: could not generate a well-formed target")
+
+
+@lru_cache(maxsize=4096)
+def _public_payload(seed: str, difficulty: int) -> dict[str, Any]:
+    """Public-generation core -> solver-visible metadata + public test inputs.
+
+    Only the public (seed, difficulty) is consumed: function signature,
+    budget, input domain, and the public test *input* vectors. The expected
+    outputs are attached by the verifier authority (``generate_with_solution``)
+    because computing them requires the secret-bound reference target.
     """
     try:
         preset = DIFFICULTY_PRESETS[difficulty]
@@ -447,60 +615,90 @@ def _generate_all(
 
     rng = _make_rng(seed, difficulty)
     params = list(_PARAM_POOL[difficulty])
-
-    target: tuple[Any, ...] | None = None
-    public: list[dict[str, Any]] | None = None
-    hidden: list[dict[str, Any]] | None = None
-    target_src = ""
-    for _ in range(50):
-        candidate_target = sample_program(
-            rng, params, preset.ops, preset.unary, preset.max_depth, preset.input_width
-        )
-        # Reject trivial targets (bare var/num): no operation means the
-        # challenge has no reasoning content and is solvable by copy.
-        if candidate_target[0] in ("num", "var"):
-            continue
-        pub = _sample_tests(rng, params, preset, candidate_target, preset.public_tests)
-        if pub is None:
-            continue
-        hid = _sample_tests(rng, params, preset, candidate_target, preset.hidden_tests)
-        if hid is None:
-            continue
-        target = candidate_target
-        public = pub
-        hidden = hid
-        target_src = program_to_source(candidate_target)
-        break
-    if target is None:
-        raise RuntimeError("synth-v0.1: could not generate a well-formed challenge")
-    assert public is not None and hidden is not None  # set together with target
-
-    payload = {
+    public_inputs = [
+        {"input": {p: rng.randint(-preset.input_width, preset.input_width) for p in params}}
+        for _ in range(preset.public_tests)
+    ]
+    return {
         "function": {"name": "f", "params": params},
-        "public_tests": public,
         "input_width": preset.input_width,
         "budget": {"code_size": preset.code_size, "max_eval_ms": 10},
+        "public_test_inputs": public_inputs,
     }
-    return payload, target_src, public, hidden
 
 
 def generate(seed: str, difficulty: int) -> dict[str, Any]:
-    """Public payload for (seed, difficulty). Never contains the target or
-    hidden tests."""
-    payload, _, _, _ = _generate_all(seed, difficulty)
-    return payload
+    """Public payload for (seed, difficulty).
+
+    Contains the solver-visible metadata and the public test *inputs* only.
+    It never contains the target program, hidden tests, or expected outputs
+    — those require the verifier secret (authoritative path:
+    ``generate_with_solution`` / ``build_challenge(..., verifier_secret=...)``).
+    """
+    return dict(_public_payload(seed, difficulty))
 
 
-def hidden_tests_for(seed: str, difficulty: int) -> list[dict[str, Any]]:
-    """Hidden test vectors (input, expected) — for tests/calibration only."""
-    _, _, _, hidden = _generate_all(seed, difficulty)
+@lru_cache(maxsize=4096)
+def _hidden_tests(
+    verifier_secret: str, seed: str, difficulty: int,
+) -> list[dict[str, Any]]:
+    """Hidden test vectors for (secret, seed, difficulty).
+
+    Deterministic for a fixed secret; different secrets yield different
+    vectors. Inputs come from the domain-separated ``hidden`` stream and the
+    expected outputs from the secret-bound target. Used only by the
+    authoritative verifier (and tests/calibration that hold an explicit
+    secret).
+    """
+    target, _ = _generate_target(verifier_secret, seed, difficulty)
+    preset = DIFFICULTY_PRESETS[difficulty]
+    params = list(_PARAM_POOL[difficulty])
+    hidden = _sample_tests(
+        _hidden_rng(verifier_secret, seed, difficulty),
+        params,
+        preset,
+        target,
+        preset.hidden_tests,
+    )
+    if hidden is None:
+        raise RuntimeError("synth-v0.1: could not generate hidden tests")
     return hidden
 
 
-def generate_with_solution(seed: str, difficulty: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Payload plus the hidden solution reference (target program + hidden
-    tests). The hidden solution is never serialized into a public challenge."""
-    payload, target_src, _, hidden = _generate_all(seed, difficulty)
+def hidden_tests_for(
+    seed: str, difficulty: int, verifier_secret: str
+) -> list[dict[str, Any]]:
+    """Hidden test vectors (input, expected) — for tests/calibration only.
+
+    Requires the verifier *secret*; a solver holding only the public challenge
+    cannot call this to obtain hidden material.
+    """
+    return _hidden_tests(verifier_secret, seed, difficulty)
+
+
+def generate_with_solution(
+    seed: str, difficulty: int, verifier_secret: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Authoritative generation: full solver-visible payload + verifier solution.
+
+    ``payload`` is the complete challenge payload — signature, budget, and the
+    public (input -> expected) examples — assembled by the verifier authority
+    from the secret-bound target. ``solution`` carries the reference target
+    program and the hidden tests. Without ``verifier_secret`` neither is
+    obtainable; the solution is never serialized into a public challenge.
+    """
+    payload = dict(_public_payload(seed, difficulty))
+    target, target_src = _generate_target(verifier_secret, seed, difficulty)
+    public_tests = []
+    for case in payload.pop("public_test_inputs"):
+        public_tests.append(
+            {
+                "input": dict(case["input"]),
+                "expected": eval_program(target, dict(case["input"])),
+            }
+        )
+    payload["public_tests"] = public_tests
+    hidden = _hidden_tests(verifier_secret, seed, difficulty)
     return payload, {"target_program": target_src, "hidden_tests": hidden}
 
 
@@ -508,10 +706,17 @@ def generate_with_solution(seed: str, difficulty: int) -> tuple[dict[str, Any], 
 
 def public_tests_ok(payload: dict[str, Any], src: str) -> bool:
     """Cheap self-check used by solver systems: does *src* match all public
-    tests? Never raises. The arena verifier remains the authority."""
+    tests? Never raises. The arena verifier remains the authority.
+
+    A payload without public examples (only the public-generation part) is
+    not a solver-usable challenge and never passes this self-check.
+    """
+    public_tests = payload.get("public_tests")
+    if not isinstance(public_tests, list) or not public_tests:
+        return False
     try:
         node = parse_program(src)
-        for t in payload.get("public_tests", []):
+        for t in public_tests:
             if eval_program(node, dict(t["input"])) != t["expected"]:
                 return False
         return True
@@ -521,15 +726,19 @@ def public_tests_ok(payload: dict[str, Any], src: str) -> bool:
 
 # ------------------------------------------------------------------ family
 
-def _resolve_challenge(challenge: Any) -> tuple[dict[str, Any], str, int]:
-    """Normalize either a full challenge dict or a bare payload.
+def _resolve_challenge(challenge: Any) -> tuple[dict[str, Any], str, int, str | None]:
+    """Normalize a challenge into (payload, seed, difficulty, verifier_secret).
 
-    Hidden-test regeneration needs (seed, difficulty). When only a bare
-    payload is given (tests, ad-hoc calls) a stable payload-derived seed is
-    used; the public tests are still checked against the given payload.
+    The verifier secret is read from ``challenge[VERIFIER_SECRET_KEY]`` when the
+    authoritative verifier injected it (``verify_submission``). Solver-facing
+    challenge dicts never carry it, so only the authority can unlock hidden
+    tests. When only a bare payload is given (tests / solver self-checks) a
+    stable payload-derived seed is used and no hidden material is available.
     """
     if not isinstance(challenge, dict):
         raise TypeError("challenge must be a dict")
+    secret = challenge.get(VERIFIER_SECRET_KEY)
+    secret = str(secret) if isinstance(secret, str) and secret else None
     payload = challenge.get("payload")
     if isinstance(payload, dict):
         seed = challenge.get("seed")
@@ -538,9 +747,9 @@ def _resolve_challenge(challenge: Any) -> tuple[dict[str, Any], str, int]:
         difficulty = int(difficulty) if difficulty is not None else 0
         if difficulty not in DIFFICULTY_PRESETS:
             difficulty = 1
-        return payload, seed, difficulty
+        return payload, seed, difficulty, secret
     if "public_tests" in challenge:
-        return challenge, f"{stable_hash(challenge)}:payload", 1
+        return challenge, f"{stable_hash(challenge)}:payload", 1, secret
     raise TypeError("not a synth-v0.1 payload")
 
 
@@ -549,19 +758,35 @@ class SynthV01:
 
     type_name = TYPE_NAME
     generator_version = GENERATOR_VERSION
+    # This family's reference target is secret-bound: a complete, solver-usable
+    # challenge (with public examples) can only be assembled by an authority
+    # holding the verifier secret (registry.build_challenge).
+    requires_verifier_secret = True
 
     def generate(self, seed: str, difficulty: int) -> dict[str, Any]:
         return generate(seed, difficulty)
 
+    def generate_with_solution(
+        self, seed: str, difficulty: int, verifier_secret: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Authoritative assembly (see module-level ``generate_with_solution``)."""
+        return generate_with_solution(seed, difficulty, verifier_secret)
+
     def verify(self, challenge: Any, candidate: Any) -> bool:
-        return self.failure_code(challenge, candidate) is None
+        return self.evaluate(challenge, candidate).valid
 
     def score(self, challenge: Any, candidate: Any) -> float:
-        return 1.0 if self.verify(challenge, candidate) else 0.0
+        return self.evaluate(challenge, candidate).score
+
+    def evaluate(self, challenge: Any, candidate: Any) -> EvaluationResult:
+        """Single authoritative pass: validity + score computed exactly once."""
+        fail = self.failure_code(challenge, candidate)
+        valid = fail is None
+        return EvaluationResult(valid=valid, score=1.0 if valid else 0.0, error_code=fail)
 
     def failure_code(self, challenge: Any, candidate: Any) -> ErrorCode | None:
         try:
-            payload, seed, difficulty = _resolve_challenge(challenge)
+            payload, seed, difficulty, secret = _resolve_challenge(challenge)
             preset = DIFFICULTY_PRESETS[difficulty]
         except (TypeError, ValueError, KeyError):
             return ErrorCode.INVALID_SCHEMA
@@ -569,6 +794,14 @@ class SynthV01:
         if not isinstance(candidate, dict) or not isinstance(candidate.get("program"), str):
             return ErrorCode.INVALID_SCHEMA
         src = str(candidate["program"])
+
+        # A solver-usable challenge must carry public examples. The public-only
+        # generation output (signature/budget/inputs without expected values)
+        # is not a verifiable challenge: expected outputs require the
+        # secret-bound target, so only the authoritative path yields one.
+        public_tests = payload.get("public_tests")
+        if not isinstance(public_tests, list) or not public_tests:
+            return ErrorCode.INVALID_SCHEMA
 
         # code-size budget + hard guard
         try:
@@ -587,18 +820,23 @@ class SynthV01:
         except ParseError:
             return ErrorCode.INVALID_SCHEMA
 
-        for test in payload.get("public_tests", []):
+        for test in public_tests:
             code = self._test_code(node, test)
             if code is not None:
                 return code
-        try:
-            _, _, _, hidden = _generate_all(seed, difficulty)
-        except (ValueError, RuntimeError):
-            return ErrorCode.INTERNAL_ERROR
-        for test in hidden:
-            code = self._test_code(node, test)
-            if code is not None:
-                return code
+        # Hidden material is only checked when the authoritative verifier
+        # supplied its secret. Without it (solver self-check path) only the
+        # public tests are authoritative — which is exactly the intended
+        # boundary: solvers never see hidden material.
+        if secret is not None:
+            try:
+                hidden = _hidden_tests(secret, seed, difficulty)
+            except (ValueError, RuntimeError):
+                return ErrorCode.INTERNAL_ERROR
+            for test in hidden:
+                code = self._test_code(node, test)
+                if code is not None:
+                    return code
         return None
 
     @staticmethod
@@ -635,6 +873,7 @@ __all__ = [
     "Preset",
     "SandboxLimit",
     "TYPE_NAME",
+    "VERIFIER_SECRET_KEY",
     "eval_program",
     "generate",
     "generate_with_solution",
