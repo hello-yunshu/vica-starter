@@ -88,6 +88,17 @@ def test_build_challenge_id_stable() -> None:
     assert a.generator_version == FAMILY.generator_version
 
 
+def test_ordinary_challenge_identity_unaffected_by_material_commitment() -> None:
+    """CSP-v0.1 is not secret-bound: same (version, seed, difficulty) yields
+    the same payload and challenge_id, deterministically — and the family
+    carries no material commitment."""
+    a = build_challenge(TYPE_NAME, "csp-id-1", 2)
+    b = build_challenge(TYPE_NAME, "csp-id-1", 2)
+    assert a.id == b.id
+    assert a.payload == b.payload
+    assert a.verifier_material_commitment is None
+
+
 def test_constraint_operators_present() -> None:
     payload = generate("ops-check", 4)
     ops = {c["op"] for c in payload["constraints"]}

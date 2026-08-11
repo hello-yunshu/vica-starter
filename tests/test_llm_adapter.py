@@ -231,6 +231,67 @@ class TestSolve:
         assert "secret-value" not in str(cfg)
 
 
+class TestExplicitRetryConfig:
+    def test_max_retries_zero_is_honored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """max_retries=0 must mean zero retries: exactly ONE transport call.
+
+        A truthiness bug would silently fall back to the environment default.
+        """
+        import vica.systems.llm.llm_solver as mod
+
+        monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
+        monkeypatch.setenv("VICA_LLM_MAX_RETRIES", "3")
+        calls = {"n": 0}
+
+        def fake_transport(**kw):
+            calls["n"] += 1
+            return 500, "boom"
+
+        monkeypatch.setattr(mod, "_chat_completion", fake_transport)
+        sys_ = LLMSolverSystem(model="test-model", max_retries=0)
+        assert sys_.max_retries == 0
+        out = sys_.solve({"payload": generate("llm-seed", 1)})
+        assert calls["n"] == 1
+        assert out.metadata["attempts"] == 1
+
+    def test_env_default_retries_still_apply(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import vica.systems.llm.llm_solver as mod
+
+        monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
+        monkeypatch.setenv("VICA_LLM_MAX_RETRIES", "0")
+        calls = {"n": 0}
+
+        def fake_transport(**kw):
+            calls["n"] += 1
+            return 500, "boom"
+
+        monkeypatch.setattr(mod, "_chat_completion", fake_transport)
+        sys_ = LLMSolverSystem(model="test-model")
+        assert sys_.max_retries == 0
+        sys_.solve({"payload": generate("llm-seed", 1)})
+        assert calls["n"] == 1
+
+    def test_explicit_timeout_beats_env_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VICA_LLM_TIMEOUT_SECONDS", "120")
+        sys_ = LLMSolverSystem(model="test-model", timeout_seconds=5.0)
+        assert sys_.timeout_seconds == 5.0
+
+    @pytest.mark.parametrize("timeout", [0, -1.0])
+    def test_invalid_timeout_rejected(self, timeout: float) -> None:
+        with pytest.raises(ValueError, match="timeout_seconds must be > 0"):
+            LLMSolverSystem(model="test-model", timeout_seconds=timeout)
+
+    def test_negative_retries_rejected(self) -> None:
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            LLMSolverSystem(model="test-model", max_retries=-1)
+
+    def test_invalid_values_rejected_for_synth_systems(self) -> None:
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            SynthLLMOneShotSystem(model="test-model", max_retries=-1)
+        with pytest.raises(ValueError, match="timeout_seconds must be > 0"):
+            SynthLLMAgentSystem(model="test-model", timeout_seconds=0)
+
+
 class TestSynthPrompt:
     def _solver_payload(self, seed: str, difficulty: int) -> dict:
         """Solver-visible payload: signature, budget, and public examples.
