@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 
 import typer
 
@@ -473,6 +473,99 @@ def agent_reference(
     typer.echo(f"evaluation id: {summary['evaluation_id']}")
     typer.echo(f"baseline:      {summary['baseline']}")
     typer.echo(f"out:           {summary['out']}")
+
+
+# ------------------------------------------------------------------ v0.4 study
+
+
+study_app = typer.Typer(
+    help="v0.4 multi-run Study (replicates + layered metrics, docs/REPRODUCIBILITY.md)",
+    no_args_is_help=True,
+)
+app.add_typer(study_app, name="study")
+
+
+@study_app.command("run")
+def study_run(
+    evaluation: Annotated[Path, typer.Option(help="evaluation bundle root directory")],
+    out: Annotated[Path, typer.Option(help="study output directory")],
+    systems: Annotated[
+        str,
+        typer.Option(
+            help="JSON array of systems, e.g. "
+            '[{"system_id":"noop","kind":"noop"},'
+            '{"system_id":"reference","kind":"reference"}]'
+        ),
+    ],
+    replicates: Annotated[
+        int, typer.Option(min=1, help="replicate attempts per system (per task)")
+    ] = 1,
+    verifier_secret: Annotated[
+        str | None,
+        typer.Option(
+            help="verifier secret (default: $VICA_VERIFIER_SECRET); needed for kind=reference"
+        ),
+    ] = None,
+) -> None:
+    """Run a multi-system Study over the task pack, aggregating replicates."""
+    from vica.eval.study import StudySystem, run_study
+
+    try:
+        specs = json.loads(systems)
+    except ValueError as exc:
+        typer.echo(f"error: invalid --systems JSON: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    if not isinstance(specs, list) or not specs:
+        typer.echo("error: --systems must be a non-empty JSON array", err=True)
+        raise typer.Exit(2)
+    allowed_kinds = ("agent", "noop", "reference", "submission")
+    try:
+        study_systems = []
+        for s in specs:
+            kind = str(s["kind"])
+            if kind not in allowed_kinds:
+                raise ValueError(f"unknown kind {kind!r}; allowed: {allowed_kinds}")
+            study_systems.append(
+                StudySystem(
+                    system_id=str(s["system_id"]),
+                    kind=cast(
+                        Literal["agent", "noop", "reference", "submission"], kind
+                    ),
+                    command=s.get("command"),
+                    pass_env=s.get("pass_env"),
+                    timeout_s=float(s.get("timeout_s", 300.0)),
+                    verifier_secret=s.get("verifier_secret"),
+                )
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        typer.echo(f"error: invalid system spec: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    try:
+        summary = run_study(
+            evaluation=evaluation,
+            systems=study_systems,
+            replicates=replicates,
+            out=out,
+            verifier_secret=verifier_secret,
+        )
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"evaluation id: {summary['evaluation_id']}")
+    typer.echo(f"task pack id:  {summary['task_pack_id']}")
+    for sid in sorted(summary["systems"]):
+        s = summary["systems"][sid]
+        typer.echo(
+            f"  {sid:<12} reps={s['replicates']:<3} valid={s['valid']}/{s['challenge_count']} "
+            f"success={_fmt_rate(s['success_rate'])} "
+            f"CI[{_fmt_rate(s['ci_lower'])}..{_fmt_rate(s['ci_upper'])}]"
+        )
+    typer.echo(f"out:           {summary['out']}")
+
+
+def _fmt_rate(v: Any) -> str:
+    return f"{v:.4f}" if isinstance(v, (int, float)) else "n/a"
 
 
 # ------------------------------------------------------------------ v0.2 reverify

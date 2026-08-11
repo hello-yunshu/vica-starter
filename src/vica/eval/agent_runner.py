@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from vica.eval.bundle import load_public_bundle
+from vica.eval.environment import execution_profile
 from vica.eval.models import EvaluationFailure, ReportStatus
 from vica.eval.submission import build_submission_bundle
 from vica.repo.patch import MAX_PATCH_BYTES
@@ -162,6 +163,17 @@ def run_agent(
         system_id=system_id,
         rows=rows,
         out=out,
+        # The Execution Profile records the agent command identity, timeout, and
+        # the forwarded env *names* (never values) for reproducibility (§63).
+        system_metadata={
+            "execution_profile": execution_profile(
+                backend="local",
+                timeout_s=timeout_s,
+                network_policy="default",
+                passed_env_names=list(forwarded.keys()),
+                agent_command=command,
+            )
+        },
         # VICA-owned execution path: the wall time / exit code / solver outcome
         # below are genuinely measured by VICA, so the runner telemetry it
         # writes is trusted provenance.

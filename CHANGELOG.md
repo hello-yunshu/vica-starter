@@ -3,6 +3,29 @@
 All notable protocol changes to VICA are recorded here. Entries are concise and
 focus on protocol-level changes, not development churn.
 
+## 0.4.0 — Benchmark Validation & Reproducibility (2026-08-12)
+
+**Reproducibility & validation layer over the v0.3 Agent Benchmark.**
+
+- **Task Pack**: stable, versioned identity of a benchmark instance set
+  (`task_pack_id` / `task_pack_version` / `task_pack_hash`). Result Bundles
+  record all three; strict reverify binds the hash so a tampered result set is
+  refused even when valid/score coincide.
+- **Execution Profile**: Result Bundles record environment provenance (runner
+  backend, OS/arch, Python version, dependency-env hash, VICA version, git
+  commit, runtime policies, forwarded env **names**). Secret values are never
+  recorded.
+- **Study**: `vica study run` — multi-system × task × replicate nested loop
+  (no DAG/job queue) with aggregated success rate + Wilson CI, latency,
+  failure taxonomy, and per-difficulty metrics. Replicates are run identity,
+  never Challenge identity.
+- **Golden compatibility fixtures** under `tests/fixtures/protocol/`
+  (Bundle v1 + v2) so 1.0 can still load and reverify historical artifacts.
+- **Benchmark validation**: reference positive control, NoOp negative control,
+  public-only overfit probe, and seed-generalization checks.
+- New docs: `docs/REPRODUCIBILITY.md`, `docs/reports/repo-v0.1-validation.md`;
+  threat-model updated with Execution provenance.
+
 ## 0.3.0 — Agent Benchmark (2026-08-12)
 
 **New: REPO-v0.1 Agent Benchmark.**

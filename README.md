@@ -48,6 +48,9 @@ VICA is a local research arena. The following components exist today:
 | Evaluation Bundles | Stable | v1/v2 portable Evaluation / Submission / Result bundles |
 | Strict Reverify | Stable | Deterministic re-verification of a Result Bundle |
 | REPO-v0.1 | Stable | Agent Benchmark — coding-agent workspace + patch verification |
+| Task Pack | Stable | Versioned identity of a benchmark instance set (`task_pack_hash`) |
+| Execution Profile | Stable | Environment provenance (names only, never secret values) |
+| Study | Stable | Multi-run replicates + layered metrics (`vica study run`) |
 | SYNTH-v0.1 | Experimental | Program-synthesis research (restricted DSL) |
 | OPT-v0.1 | Experimental | Continuous solution quality (scheduling) |
 | OS sandbox | Experimental | OS resource isolation prototype (see Security) |
