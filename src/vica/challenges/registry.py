@@ -10,6 +10,7 @@ from vica.challenges.synth_v01 import FAMILY as _SYNTH_FAMILY
 from vica.protocol.models import Challenge
 from vica.protocol.serialization import canonical_json_bytes, stable_hash
 from vica.verifier.interfaces import ChallengeFamily
+from vica.verifier.material import verifier_material_commitment
 
 _REGISTRY: dict[str, ChallengeFamily] = {
     _CSP_FAMILY.type_name: _CSP_FAMILY,
@@ -55,13 +56,23 @@ def build_challenge(
     (``family.generate``) is produced. The challenge payload never carries the
     secret, the target, or the hidden tests; the authoritative verifier
     reinjects the secret at verification time.
+
+    Challenge identity (SPEC "Challenge identity"): the canonical id covers
+    ``(type, generator_version, seed, difficulty, payload)`` for ordinary
+    families. Secret-bound families additionally commit to the verifier
+    material: when *verifier_secret* is given, the full SHA-256
+    ``verifier_material_commitment`` is computed here (never by the solver)
+    and enters the identity, so same seed + different material =>
+    different challenge_id.
     """
     family = get_family(type_name)
+    commitment: str | None = None
     if getattr(family, "requires_verifier_secret", False):
         if verifier_secret is None:
             payload = family.generate(seed, difficulty)
         else:
             payload, _ = family.generate_with_solution(seed, difficulty, verifier_secret)
+            commitment = verifier_material_commitment(verifier_secret)
     else:
         payload = family.generate(seed, difficulty)
     if generator_version is not None and generator_version != family.generator_version:
@@ -77,6 +88,8 @@ def build_challenge(
         "difficulty": difficulty,
         "payload": payload,
     }
+    if commitment is not None:
+        challenge_without_id["verifier_material_commitment"] = commitment
     return Challenge(
         id=stable_hash(challenge_without_id),
         type=family.type_name,
@@ -84,6 +97,7 @@ def build_challenge(
         seed=seed,
         difficulty=difficulty,
         payload=payload,
+        verifier_material_commitment=commitment,
     )
 
 

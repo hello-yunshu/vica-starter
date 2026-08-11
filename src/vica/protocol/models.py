@@ -24,7 +24,15 @@ class ErrorCode(StrEnum):
 
 
 class Challenge(BaseModel):
-    """Logical representation of a challenge instance."""
+    """Logical representation of a challenge instance.
+
+    For secret-bound challenge families (``requires_verifier_secret``,
+    currently SYNTH-v0.1) ``verifier_material_commitment`` is the public
+    SHA-256 commitment of the verifier material the challenge was assembled
+    with. It is part of the challenge identity (SPEC "Challenge identity"),
+    and the authoritative verifier checks it before any hidden evaluation.
+    Ordinary families (CSP/OPT) keep it None.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -34,6 +42,7 @@ class Challenge(BaseModel):
     seed: str
     difficulty: int = Field(ge=1)
     payload: dict[str, Any] = Field(default_factory=dict)
+    verifier_material_commitment: str | None = None
 
 
 class CandidateSubmission(BaseModel):

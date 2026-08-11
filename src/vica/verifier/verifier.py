@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 from vica.challenges.synth_v01.family import VERIFIER_SECRET_KEY
 from vica.protocol.models import CandidateSubmission, Challenge, ErrorCode, VerificationResult
+from vica.verifier.material import verifier_material_commitment
+
+log = logging.getLogger("vica.verifier")
 
 
 def verify_submission(
@@ -26,6 +30,14 @@ def verify_submission(
     - *verifier_secret* is injected into the challenge dict under an internal,
       non-model key so the family can regenerate hidden material. It is never
       part of the solver-visible Challenge.
+
+    Verifier-material binding: when ``challenge.verifier_material_commitment``
+    is set (secret-bound families such as SYNTH-v0.1), the secret supplied to
+    this call must commit to the same material the challenge was built with.
+    A missing or non-matching secret is an evaluator configuration failure and
+    is reported as INTERNAL_ERROR (logged with ``verifier_material_mismatch``)
+    — it is never misreported as a solver INVALID_SOLUTION. The check runs
+    before any hidden-material evaluation.
     """
     from vica.challenges.registry import get_family
     from vica.verifier.interfaces import EvaluationResult
@@ -39,6 +51,36 @@ def verify_submission(
             verify_time_us=0,
             error_code=ErrorCode.WRONG_CHALLENGE,
         )
+
+    if challenge.verifier_material_commitment is not None:
+        if verifier_secret is None:
+            log.warning(
+                "verifier_material_mismatch: challenge %s commits to verifier "
+                "material but no secret was supplied",
+                challenge.id,
+            )
+            return VerificationResult(
+                challenge_id=challenge.id,
+                system_id=submission.system_id,
+                valid=False,
+                score=0.0,
+                verify_time_us=0,
+                error_code=ErrorCode.INTERNAL_ERROR,
+            )
+        if verifier_material_commitment(verifier_secret) != challenge.verifier_material_commitment:
+            log.warning(
+                "verifier_material_mismatch: challenge %s was built with different "
+                "verifier material; not evaluating hidden tests",
+                challenge.id,
+            )
+            return VerificationResult(
+                challenge_id=challenge.id,
+                system_id=submission.system_id,
+                valid=False,
+                score=0.0,
+                verify_time_us=0,
+                error_code=ErrorCode.INTERNAL_ERROR,
+            )
 
     challenge_dict: dict[str, Any] = challenge.model_dump()
     if verifier_secret:

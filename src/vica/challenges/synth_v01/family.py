@@ -40,9 +40,14 @@ from typing import Any
 from vica.protocol.models import ErrorCode
 from vica.protocol.serialization import stable_hash
 from vica.verifier.interfaces import EvaluationResult
+from vica.verifier.material import verifier_material_commitment
 
 TYPE_NAME = "synth-v0.1"
-GENERATOR_VERSION = "0.1.0"
+# Post-isolation generator semantics (target secret-bound, hidden secret-bound,
+# public expected values secret-dependent) are NOT the historical 0.1.0
+# generator (target derived from the public seed). 0.2.0 keeps provenance
+# distinct: historical experiments remain labelled 0.1.0.
+GENERATOR_VERSION = "0.2.0"
 
 # Verifier-only secret key injected into the challenge dict by the authoritative
 # verifier (verify_submission). Solver-facing challenge dicts never carry it, so
@@ -824,6 +829,16 @@ class SynthV01:
             code = self._test_code(node, test)
             if code is not None:
                 return code
+        # Verifier-material binding: when the challenge commits to a material
+        # (``verifier_material_commitment`` on the Challenge), the supplied
+        # secret must reproduce that commitment. A mismatch is an evaluator
+        # configuration failure (INTERNAL_ERROR, reason
+        # ``verifier_material_mismatch``), never a solver INVALID_SOLUTION, and
+        # hidden tests are never evaluated with the wrong material.
+        commitment = challenge.get("verifier_material_commitment")
+        if secret is not None and commitment is not None:
+            if verifier_material_commitment(secret) != commitment:
+                return ErrorCode.INTERNAL_ERROR
         # Hidden material is only checked when the authoritative verifier
         # supplied its secret. Without it (solver self-check path) only the
         # public tests are authoritative — which is exactly the intended
