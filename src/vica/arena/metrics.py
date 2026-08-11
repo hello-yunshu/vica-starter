@@ -170,4 +170,4 @@ def _percentile(values: list[float], p: int) -> float:
     return ordered[rank - 1]
 
 
-__all__ = ["SystemMetrics", "aggregate"]
+__all__ = ["SystemMetrics", "aggregate", "regret_quality"]

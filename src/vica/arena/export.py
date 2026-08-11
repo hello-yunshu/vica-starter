@@ -34,6 +34,7 @@ _COLUMNS = [
     "input_tokens",
     "output_tokens",
     "estimated_cost_usd",
+    "regret",
     "model",
 ]
 
@@ -76,6 +77,7 @@ def write_metrics_csv(records: list[RunRecord], fh: TextIO) -> None:
         "cost_per_valid_solution",
         "valid_solutions_per_dollar",
         "valid_solutions_per_second",
+        "mean_regret",
         "mean_attempts",
         "tokens_in",
         "tokens_out",
@@ -100,6 +102,7 @@ def write_metrics_csv(records: list[RunRecord], fh: TextIO) -> None:
                 "cost_per_valid_solution": _round_opt(m.cost_per_valid_solution, 6),
                 "valid_solutions_per_dollar": _round_opt(m.valid_solutions_per_dollar, 4),
                 "valid_solutions_per_second": round(m.valid_solutions_per_second, 4),
+                "mean_regret": _round_opt(m.mean_regret, 4),
                 "mean_attempts": round(m.mean_attempts, 2),
                 "tokens_in": m.tokens_in,
                 "tokens_out": m.tokens_out,
@@ -128,6 +131,7 @@ def _record_to_row(r: RunRecord) -> dict:
         "input_tokens": m.get("input_tokens", ""),
         "output_tokens": m.get("output_tokens", ""),
         "estimated_cost_usd": m.get("estimated_cost_usd", ""),
+        "regret": m.get("regret", ""),
         "model": m.get("model", ""),
     }
 

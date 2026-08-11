@@ -120,6 +120,7 @@ def report(
             f"cost=${format_optional_metric(m.total_cost_usd, '.5f')}  "
             f"$/sol={format_optional_metric(m.cost_per_valid_solution, '.5f')}  "
             f"SPD={format_optional_metric(m.valid_solutions_per_dollar, '.2f')}  "
+            f"regret={format_optional_metric(m.mean_regret, '.4f')}  "
             f"SPS={m.valid_solutions_per_second:.2f}"
         )
 

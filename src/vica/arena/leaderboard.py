@@ -83,11 +83,12 @@ def format_leaderboard(rows: list[dict]) -> str:
         + "score".rjust(8)
         + "mean_ms".rjust(9)
         + "p95_ms".rjust(9)
+        + "regret".rjust(9)
         + "cost_usd".rjust(10)
         + "$/sol".rjust(12)
         + "SPD".rjust(12)
         + "SPS".rjust(10),
-        "-" * 96,
+        "-" * 105,
     ]
     for r in rows:
         lines.append(
@@ -96,6 +97,7 @@ def format_leaderboard(rows: list[dict]) -> str:
             + f"{r['mean_score']:.3f}".rjust(8)
             + f"{r['mean_solve_ms']:.1f}".rjust(9)
             + f"{r['p95_solve_ms']:.1f}".rjust(9)
+            + _fmt(r["mean_regret"], ".3f").rjust(9)
             + _fmt(r["total_cost_usd"], ".4f").rjust(10)
             + _fmt(r["cost_per_valid_solution"], ".5f").rjust(12)
             + _fmt(r["valid_solutions_per_dollar"], ".2f").rjust(12)

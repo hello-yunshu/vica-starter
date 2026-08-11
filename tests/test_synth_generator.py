@@ -59,6 +59,14 @@ def test_different_verifier_secret_yields_different_hidden_tests() -> None:
     assert a != b
 
 
+def test_same_secret_same_seed_reproduce_same_material() -> None:
+    """Same authoritative inputs => same target and hidden tests (§3.2)."""
+    p1, s1 = generate_with_solution("repro-seed", 4, TEST_SECRET)
+    p2, s2 = generate_with_solution("repro-seed", 4, TEST_SECRET)
+    assert p1 == p2
+    assert s1 == s2
+
+
 def test_different_difficulties_produce_different_payloads() -> None:
     assert generate("seed", 1) != generate("seed", 3)
 

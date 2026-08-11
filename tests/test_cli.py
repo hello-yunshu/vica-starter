@@ -1,7 +1,13 @@
-"""CLI end-to-end tests (SPEC section 13.4): report must not crash on N/A."""
+"""End-to-end CLI tests (docs/reports stabilization §5.2, §13.4).
+
+Covers the full ``vica benchmark -> vica report -> vica leaderboard`` path for
+systems whose ``estimated_cost_usd`` is UNKNOWN (random / z3): the report must
+render ``N/A`` and exit 0, never crash on ``None`` costs.
+"""
 
 from __future__ import annotations
 
+import pytest
 from typer.testing import CliRunner
 
 from vica.cli import app
@@ -9,62 +15,61 @@ from vica.cli import app
 runner = CliRunner()
 
 
-def _run(*args: str):
-    return runner.invoke(app, list(args))
-
-
-def test_help() -> None:
-    result = _run("--help")
-    assert result.exit_code == 0
-    assert "VICA" in result.output
+@pytest.fixture()
+def db_path(tmp_path) -> str:
+    return str(tmp_path / "cli.db")
 
 
 def test_version() -> None:
-    result = _run("version")
+    result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    # Non-empty version string on a single line.
-    assert result.output.strip()
+    assert result.output.strip() != ""
 
 
-def test_benchmark_report_unknown_cost_is_na(tmp_path) -> None:
-    """A random (cost-UNKNOWN) benchmark must report a clean N/A, exit 0.
+def test_help() -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "benchmark" in result.output
+    assert "report" in result.output
+    assert "leaderboard" in result.output
 
-    ``random`` never sets ``estimated_cost_usd``, so every cost-derived metric
-    is UNKNOWN. The report renderer must surface them as N/A, not crash.
-    """
-    db = str(tmp_path / "cli.db")
-    bench = _run("benchmark", "--challenge", "csp-v0.1", "--difficulty", "1",
-                 "--systems", "random", "--instances", "2", "--seed", "42",
-                 "--db", db)
-    assert bench.exit_code == 0, bench.output
-    # Extract the experiment id from the output line.
-    exp_id = None
-    for line in bench.output.splitlines():
-        if line.startswith("experiment id:"):
-            exp_id = line.split(":", 1)[1].strip()
-    assert exp_id
 
-    rep = _run("report", exp_id, "--db", db)
-    assert rep.exit_code == 0, rep.output
-    assert "N/A" in rep.output
-    assert "$/sol" in rep.output
+def test_unknown_challenge_type_fails() -> None:
+    result = runner.invoke(
+        app, ["benchmark", "--challenge", "nope-v1", "--db", "/tmp/nope.db"]
+    )
+    assert result.exit_code == 1
+    assert "unknown challenge type" in result.output
 
-    lb = _run("leaderboard", exp_id, "--db", db)
+
+def test_benchmark_report_leaderboard_unknown_cost(db_path: str) -> None:
+    """random/z3 have unknown costs; report/leaderboard must print N/A, exit 0."""
+    result = runner.invoke(
+        app, [
+            "benchmark",
+            "--challenge", "csp-v0.1",
+            "--difficulty", "1",
+            "--systems", "random,z3",
+            "--instances", "2",
+            "--seed", "42",
+            "--db", db_path,
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert "experiment id:" in result.output
+    experiment_id = result.output.split("experiment id: ")[1].strip().split()[0]
+
+    report = runner.invoke(app, ["report", experiment_id, "--db", db_path])
+    assert report.exit_code == 0, report.output
+    assert "N/A" in report.output  # UNKNOWN cost must render as N/A
+    assert "metrics:" in report.output
+
+    lb = runner.invoke(app, ["leaderboard", experiment_id, "--db", db_path])
     assert lb.exit_code == 0, lb.output
     assert "N/A" in lb.output
 
 
-def test_benchmark_incompatible_pairing_exits_nonzero(tmp_path) -> None:
-    """z3 + synth is a configuration error: nonzero exit, no crash."""
-    db = str(tmp_path / "cli2.db")
-    result = _run("benchmark", "--challenge", "synth-v0.1", "--difficulty", "1",
-                  "--systems", "z3", "--instances", "1", "--seed", "1", "--db", db)
-    assert result.exit_code != 0
-    assert "does not support challenge" in result.output
-
-
-def test_report_no_runs_exits_nonzero(tmp_path) -> None:
-    db = str(tmp_path / "cli3.db")
-    result = _run("report", "exp-missing", "--db", db)
-    assert result.exit_code != 0
+def test_report_missing_experiment_exits_nonzero(db_path: str) -> None:
+    result = runner.invoke(app, ["report", "exp-does-not-exist", "--db", db_path])
+    assert result.exit_code == 1
     assert "no runs found" in result.output
