@@ -15,6 +15,11 @@
 > 见下方"§3 复核结果"与 §4 结论修正。本报告不再声称任何有效的 LLM-vs-基线对比。
 > 真实 LLM 对比需在**当前** secret-bound generator 下重新生成 probe set（见 §6）。
 
+> **Generator 版本**：当前 SYNTH 实现使用 `generator_version` **0.2.0**
+> （target / hidden / public examples 全部 secret-bound）。本报告所有数字
+> 均来自历史 `generator_version` **0.1.0**（target 由 public seed 派生），
+> 早于 verifier-material isolation，两者不可直接比较。
+
 > 本报告量化一个核心研究问题：**通用模型（LLM）在程序合成上如何与穷举基线对比？**
 > 由于没有真实 API key，我们用两种方式来代表 LLM：一是直接在 cue 上推理（`llm-short`，
 > 一种"短表达式第一"的归纳搜索，模拟通用模型先尝试简洁解法的行为）；二是

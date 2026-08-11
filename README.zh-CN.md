@@ -35,7 +35,7 @@ VICA 是 Local Research Arena。以下组件当前已存在：
 
 | 组件 | 状态 | 用途 |
 |------|------|------|
-| Protocol Core | Stable | Pydantic 模型、canonical 序列化、接口 |
+| Protocol Core | Stable | Pydantic 模型、canonical 序列化、接口、challenge identity |
 | CSP-v0.1 | Stable | 基础设施验证（约束满足） |
 | Random baseline | Stable | 地板基线 |
 | Z3 baseline | Stable | 传统 Solver 基线 |
@@ -70,6 +70,14 @@ VICA 是 Local Research Arena。以下组件当前已存在：
 - 传统 Solver 压制通用模型是有效的研究结果。
 - 可复现性元数据（git commit、VICA 版本、generator 版本、系统配置、
   环境清单、seed）在每个实验中被持久化。
+- Challenge identity 由声明输入可复现：普通家族为
+  `(type, generator_version, seed, difficulty)`；secret-bound 家族额外包含
+  `verifier_material_commitment`（对含 material version 的 domain-separated
+  字符串做完整 SHA-256），因此相同 public seed + 不同 verifier material
+  得到不同 challenge_id。
+- 当提供的 secret 与 Challenge 的 material commitment 不匹配时，verifier
+  拒绝执行 hidden 评估：这是 evaluator 配置失败（`INTERNAL_ERROR`，原因
+  `verifier_material_mismatch`），绝不是 Solver 的 `INVALID_SOLUTION`。
 - 隐藏验证材料（hidden tests、参考解、verifier secret）与 Solver 输入隔离。
   见 `docs/SPEC.md` "Verifier Material"。
 
@@ -79,7 +87,9 @@ VICA 是 Local Research Arena。以下组件当前已存在：
 >
 > Evaluation Mode **保证**：参考 target 与 hidden tests 由 verifier secret
 > 绑定（HMAC 派生；仅凭 public seed 无法恢复），Solver 可见的 challenge 从不包含
-> verifier material，且 active evaluator secret 从不写入 Solver 可读的实验 DB。
+> verifier material，active evaluator secret 从不写入 Solver 可读的实验 DB，
+> 且 secret-bound challenge 会公开承诺其 verifier material，verifier 可在任何
+> hidden 评估之前拒绝错误的 secret。
 > Evaluation Mode **不保证**：拿到 verifier-private 路径或 secret 本身的 Agent
 > 仍可恢复隐藏材料，因此对抗性评估必须把 Solver 放在不含 verifier-private 状态的
 > 独立 workspace 中运行。
@@ -104,7 +114,8 @@ VICA 是 Local Research Arena。以下组件当前已存在：
 
 - `docs/reports/csp-v0.1-first-run.md` —— CSP Random vs Z3（基础设施验证）。
 - `docs/reports/synth-v0.1-scale.md` —— SYNTH random vs brute（工程验证；早于
-  verifier-secret hidden-material 隔离）。
+  verifier-secret hidden-material 隔离；使用历史 generator `0.1.0`——当前
+  post-isolation generator 为 `0.2.0`）。
 - `docs/reports/opt-v0.1-scale.md` —— OPT 基线，含精确 DP 参照。
 
 早于 hidden-material 隔离的报告会明确披露：它们不是对抗性 public benchmark。
