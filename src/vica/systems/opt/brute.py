@@ -19,9 +19,13 @@ class BruteOptSystem:
     """Exhaustive permutation search; the naive traditional baseline."""
 
     system_id = "opt-brute"
+    supported_challenge_types: frozenset[str] = frozenset({"opt-v0.1"})
 
     def __init__(self, max_seconds: float = 10.0) -> None:
         self.max_seconds = max_seconds
+
+    def config(self) -> dict[str, Any]:
+        return {"max_seconds": self.max_seconds}
 
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         payload = challenge.get("payload", {})

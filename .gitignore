@@ -12,6 +12,8 @@ build/
 !.env.example
 *.sqlite
 *.sqlite3
+*.db
+.vica/
 .DS_Store
 .idea/
 .vscode/
