@@ -36,8 +36,10 @@ from typing import Any
 
 from vica import __version__
 from vica.challenges.registry import available_types, build_challenge, get_family
-from vica.eval.models import BUNDLE_FORMAT_VERSION, EvaluationFailure
+from vica.eval.dispatch import check_evaluation_version
+from vica.eval.models import BUNDLE_FORMAT_VERSION, BUNDLE_FORMAT_VERSION_V2, EvaluationFailure
 from vica.protocol.serialization import canonical_json_bytes, stable_hash
+from vica.repo.workspace import WorkspaceError, materialize_workspace
 from vica.verifier.material import MATERIAL_VERSION, material_id, verifier_material_commitment
 
 PUBLIC_DIR = "public"
@@ -47,6 +49,9 @@ PUBLIC_CHALLENGES = "challenges.jsonl"
 PUBLIC_README = "README.md"
 PRIVATE_MANIFEST = "manifest.json"
 PRIVATE_MATERIAL = "verifier-material.json"
+# v2 Evaluation layout: solver-visible materialized REPO workspaces, one
+# directory per challenge id (docs/SPEC.md "Evaluation Bundle Versioning").
+PUBLIC_WORKSPACES_DIR = "workspaces"
 
 # Hard limits on untrusted bundle inputs (docs/BENCHMARK_METHODOLOGY.md
 # "Bundle size / input limits").
@@ -65,6 +70,19 @@ def _challenges_hash(challenge_dicts: list[dict[str, Any]]) -> str:
     return stable_hash(challenge_dicts)
 
 
+def _bundle_version_for(challenge_type: str) -> str:
+    """Evaluation layout version for a challenge type.
+
+    The v2 layout is used for the REPO Workspace benchmark (its solver-visible
+    workspaces are materialized as real files under ``public/workspaces/``).
+    All other families keep the v1 layout; the dispatcher routes strictly by
+    the advertised version.
+    """
+    from vica.repo.generator import TYPE_NAME as REPO_TYPE_NAME
+
+    return BUNDLE_FORMAT_VERSION_V2 if challenge_type == REPO_TYPE_NAME else BUNDLE_FORMAT_VERSION
+
+
 def prepare_evaluation(
     *,
     challenge_type: str,
@@ -81,6 +99,11 @@ def prepare_evaluation(
     ``VICA_VERIFIER_SECRET`` when set, else freshly generated and persisted in
     the private bundle. For ordinary families (CSP/OPT) no secret is used.
     Returns a summary dict (no secrets).
+
+    The REPO Workspace benchmark (repo-v0.1) is written in the **v2** layout:
+    each challenge's solver-visible workspace is additionally materialized as
+    real files under ``public/workspaces/<challenge-id>/`` so a Coding Agent is
+    handed a working directory, not an embedded payload.
     """
     if challenge_type not in available_types():
         raise ValueError(
@@ -91,6 +114,7 @@ def prepare_evaluation(
     if instances < 1:
         raise ValueError("instances must be >= 1")
 
+    bundle_version = _bundle_version_for(challenge_type)
     family = get_family(challenge_type)
     is_secret = bool(getattr(family, "requires_verifier_secret", False))
     if is_secret:
@@ -116,10 +140,11 @@ def prepare_evaluation(
         instances=instances,
         seed=seed,
         commitment=commitment,
+        bundle_version=bundle_version,
     )
 
     public_manifest: dict[str, Any] = {
-        "bundle_format_version": BUNDLE_FORMAT_VERSION,
+        "bundle_format_version": bundle_version,
         "evaluation_id": evaluation_id,
         "vica_version": __version__,
         "challenge_type": challenge_type,
@@ -135,7 +160,7 @@ def prepare_evaluation(
     public_manifest["manifest_hash"] = _self_hash(public_manifest)
 
     private_manifest: dict[str, Any] = {
-        "bundle_format_version": BUNDLE_FORMAT_VERSION,
+        "bundle_format_version": bundle_version,
         "evaluation_id": evaluation_id,
         "challenge_type": challenge_type,
         "generator_version": family.generator_version,
@@ -158,8 +183,14 @@ def prepare_evaluation(
     (public_dir / PUBLIC_README).write_text(_public_readme(public_manifest), encoding="utf-8")
     _write_json(private_dir / PRIVATE_MANIFEST, private_manifest)
 
+    # v2 layout: materialize each REPO challenge's solver-visible workspace as
+    # real files so an Agent is handed a working directory (not an embedded
+    # payload). The write is authoritative: workspace_hash must match.
+    if bundle_version == BUNDLE_FORMAT_VERSION_V2:
+        _materialize_public_workspaces(public_dir, challenges)
+
     material = {
-        "bundle_format_version": BUNDLE_FORMAT_VERSION,
+        "bundle_format_version": bundle_version,
         "evaluation_id": evaluation_id,
         "verifier_material_version": MATERIAL_VERSION if is_secret else None,
         "verifier_material_commitment": commitment,
@@ -192,9 +223,10 @@ def _evaluation_id(
     instances: int,
     seed: int,
     commitment: str | None,
+    bundle_version: str,
 ) -> str:
     definition = {
-        "bundle_format_version": BUNDLE_FORMAT_VERSION,
+        "bundle_format_version": bundle_version,
         "challenge_type": challenge_type,
         "generator_version": generator_version,
         "difficulties": difficulties,
@@ -203,6 +235,56 @@ def _evaluation_id(
         "verifier_material_commitment": commitment,
     }
     return "eval-" + stable_hash(definition)[:12]
+
+
+def _materialize_public_workspaces(
+    public_dir: Path, challenges: list[dict[str, Any]]
+) -> None:
+    """Materialize each REPO challenge's workspace under ``public/workspaces/``.
+
+    The manifest / files embedded in the challenge payload are written to real
+    files so an Agent can operate on a directory. The authoritative
+    ``workspace_hash`` is re-derived from the written files and must match the
+    challenge's declared hash — a mismatch is an evaluator error (never a
+    solver outcome).
+    """
+    from vica.repo.workspace import workspace_hash
+
+    ws_root = public_dir / PUBLIC_WORKSPACES_DIR
+    ws_root.mkdir(parents=True, exist_ok=True)
+    for ch in challenges:
+        payload = ch.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        manifest = payload.get("workspace_manifest")
+        files = payload.get("workspace_files")
+        if not isinstance(manifest, list) or not isinstance(files, dict):
+            continue
+        cid = str(ch.get("id", ""))
+        if not cid:
+            continue
+        dest = ws_root / cid
+        try:
+            materialize_workspace(
+                manifest,
+                {k: _to_bytes(v) for k, v in files.items()},
+                dest,
+            )
+        except WorkspaceError as exc:
+            raise EvaluationFailure(
+                f"cannot materialize public workspace for {cid}: {exc}"
+            ) from exc
+        declared = payload.get("workspace_hash")
+        if isinstance(declared, str) and workspace_hash(dest) != declared:
+            raise EvaluationFailure(
+                f"public workspace {cid} does not match its declared workspace_hash"
+            )
+
+
+def _to_bytes(v: Any) -> bytes:
+    if isinstance(v, bytes):
+        return v
+    return str(v).encode("utf-8")
 
 
 def load_public_bundle(public_dir: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -222,7 +304,7 @@ def load_public_bundle(public_dir: str | Path) -> tuple[dict[str, Any], list[dic
         raise EvaluationFailure(f"missing public bundle directory {root}")
     manifest = _read_json(public_dir / PUBLIC_MANIFEST, max_bytes=MAX_MANIFEST_BYTES)
     _check_manifest_hash(manifest, "public manifest")
-    _check_bundle_version(manifest, "public manifest", BUNDLE_FORMAT_VERSION)
+    check_evaluation_version(manifest.get("bundle_format_version"), "public manifest")
     challenges = _read_jsonl(public_dir / PUBLIC_CHALLENGES, MAX_CHALLENGES)
     if _challenges_hash(challenges) != manifest.get("challenges_hash"):
         raise EvaluationFailure(
@@ -238,7 +320,7 @@ def load_public_manifest(evaluation: str | Path) -> dict[str, Any]:
     public_dir = _resolve_public_dir(evaluation)
     manifest = _read_json(public_dir / PUBLIC_MANIFEST, max_bytes=MAX_MANIFEST_BYTES)
     _check_manifest_hash(manifest, "public manifest")
-    _check_bundle_version(manifest, "public manifest", BUNDLE_FORMAT_VERSION)
+    check_evaluation_version(manifest.get("bundle_format_version"), "public manifest")
     return manifest
 
 
@@ -246,7 +328,7 @@ def load_private_manifest(evaluation: str | Path) -> dict[str, Any]:
     private_dir = _resolve_private_dir(evaluation)
     manifest = _read_json(private_dir / PRIVATE_MANIFEST, max_bytes=MAX_MANIFEST_BYTES)
     _check_manifest_hash(manifest, "private manifest")
-    _check_bundle_version(manifest, "private manifest", BUNDLE_FORMAT_VERSION)
+    check_evaluation_version(manifest.get("bundle_format_version"), "private manifest")
     return manifest
 
 
@@ -385,15 +467,6 @@ def _check_manifest_hash(manifest: dict[str, Any], label: str) -> None:
         raise EvaluationFailure(f"{label} is missing manifest_hash")
     if _self_hash(manifest) != expected:
         raise EvaluationFailure(f"{label} manifest_hash mismatch (tampered or corrupted)")
-
-
-def _check_bundle_version(manifest: dict[str, Any], label: str, supported: str) -> None:
-    version = manifest.get("bundle_format_version")
-    if version != supported:
-        raise EvaluationFailure(
-            f"unsupported bundle format version {version!r} in {label}; "
-            f"supported: {supported!r}"
-        )
 
 
 def validate_verifier_material(

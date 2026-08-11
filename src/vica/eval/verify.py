@@ -34,10 +34,12 @@ from vica.eval.bundle import (
     validate_generator_version,
     validate_verifier_material,
 )
+from vica.eval.dispatch import check_result_version, is_v2
 from vica.eval.environment import environment_manifest, git_commit
 from vica.eval.metrics import summarize
 from vica.eval.models import (
     RESULT_BUNDLE_VERSION,
+    RESULT_BUNDLE_VERSION_V2,
     EvaluationFailure,
     ReportStatus,
     ResultRecord,
@@ -47,6 +49,7 @@ from vica.eval.report import render_report
 from vica.eval.submission import load_submission_bundle
 from vica.protocol.models import CandidateSubmission, Challenge
 from vica.protocol.serialization import canonical_json_bytes, stable_hash
+from vica.repo.family import repo_result_metadata
 from vica.verifier.verifier import verify_submission
 
 # Fixed set of file names a Result Bundle v1 may contain (docs/BENCHMARK_METHODOLOGY.md).
@@ -253,6 +256,7 @@ def _verify_one(
         if optimal is not None:
             meta["optimal_score"] = optimal
             meta["regret"] = optimal - result.score
+    meta = repo_result_metadata(ch, candidate, meta)
     return to_result_record(
         challenge_id=challenge.id,
         challenge_type=ch.get("type", ""),
@@ -337,8 +341,15 @@ def _write_result_bundle(
     file_hashes = {
         name: "sha256:" + hashlib.sha256(content).hexdigest() for name, content in files.items()
     }
+    # A v2 evaluation produces a v2 Result Bundle; the dispatcher routes strictly
+    # by the advertised version.
+    result_version = (
+        RESULT_BUNDLE_VERSION_V2
+        if is_v2(str(public_manifest.get("bundle_format_version")))
+        else RESULT_BUNDLE_VERSION
+    )
     manifest: dict[str, Any] = {
-        "result_bundle_version": RESULT_BUNDLE_VERSION,
+        "result_bundle_version": result_version,
         "evaluation_id": public_manifest.get("evaluation_id"),
         "evaluation_manifest_hash": public_manifest.get("manifest_hash"),
         "challenge_type": public_manifest.get("challenge_type"),
@@ -395,11 +406,7 @@ def load_result_bundle(result_bundle: str | Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise EvaluationFailure("result bundle manifest is not a JSON object")
-    if manifest.get("result_bundle_version") != RESULT_BUNDLE_VERSION:
-        raise EvaluationFailure(
-            f"unsupported result bundle version {manifest.get('result_bundle_version')!r}; "
-            f"supported: {RESULT_BUNDLE_VERSION!r}"
-        )
+    check_result_version(manifest.get("result_bundle_version"), "result bundle manifest")
     if _bundle_hash(manifest) != manifest.get("bundle_hash"):
         raise EvaluationFailure("result bundle manifest hash mismatch (tampered or corrupted)")
 

@@ -26,7 +26,12 @@ from pathlib import Path
 from typing import Any
 
 from vica.eval.bundle import load_public_challenges, load_public_manifest
-from vica.eval.models import SUBMISSION_BUNDLE_VERSION, EvaluationFailure
+from vica.eval.dispatch import check_submission_version, is_v2
+from vica.eval.models import (
+    SUBMISSION_BUNDLE_VERSION,
+    SUBMISSION_BUNDLE_VERSION_V2,
+    EvaluationFailure,
+)
 
 MAX_SUBMISSION_LINE_BYTES = 1 << 20
 MAX_SUBMISSIONS = 100_000
@@ -65,12 +70,20 @@ def build_submission_bundle(
     stay ``False`` (default), in which case reserved ``_vica_*`` metadata keys
     are stripped so an untrusted solver cannot forge runner provenance.
     """
+    public_manifest = load_public_manifest(evaluation)
     expected = load_public_challenges(evaluation)
     expected_ids = {ch["id"] for ch in expected}
-    evaluation_id = load_public_manifest(evaluation).get("evaluation_id")
+    evaluation_id = public_manifest.get("evaluation_id")
+    # A v2 evaluation (REPO Workspace Benchmark) produces a v2 Submission Bundle;
+    # the dispatcher routes strictly by the advertised version.
+    submission_version = (
+        SUBMISSION_BUNDLE_VERSION_V2
+        if is_v2(str(public_manifest.get("bundle_format_version")))
+        else SUBMISSION_BUNDLE_VERSION
+    )
 
     manifest: dict[str, Any] = {
-        "submission_bundle_version": SUBMISSION_BUNDLE_VERSION,
+        "submission_bundle_version": submission_version,
         "evaluation_id": evaluation_id,
         "system_id": system_id,
         "system_metadata": dict(system_metadata or {}),
@@ -146,12 +159,9 @@ def load_submission_bundle(
         raise EvaluationFailure("submission manifest is too large")
 
     manifest = _read_json(manifest_path)
-    if manifest.get("submission_bundle_version") != SUBMISSION_BUNDLE_VERSION:
-        raise EvaluationFailure(
-            f"unsupported submission bundle version "
-            f"{manifest.get('submission_bundle_version')!r}; supported: "
-            f"{SUBMISSION_BUNDLE_VERSION!r}"
-        )
+    check_submission_version(
+        manifest.get("submission_bundle_version"), "submission manifest"
+    )
     expected = load_public_challenges(evaluation)
     expected_ids = {ch["id"] for ch in expected}
     evaluation_id = load_public_manifest(evaluation).get("evaluation_id")
