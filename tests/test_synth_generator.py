@@ -68,12 +68,31 @@ def test_different_seeds_produce_different_payloads() -> None:
 
 
 def test_payload_shape() -> None:
+    """Public generation is solver-visible and carries no expected outputs."""
     payload = generate("shape", 2)
-    assert set(payload.keys()) == {"function", "public_tests", "input_width", "budget"}
+    # The public part: signature, budget, input domain, public test *inputs*.
+    # Expected outputs require the secret-bound target (authoritative path).
+    assert set(payload.keys()) == {
+        "function",
+        "public_test_inputs",
+        "input_width",
+        "budget",
+    }
     assert payload["function"]["name"] == "f"
     assert isinstance(payload["function"]["params"], list)
-    assert len(payload["public_tests"]) == DIFFICULTY_PRESETS[2].public_tests
-    for t in payload["public_tests"]:
+    assert len(payload["public_test_inputs"]) == DIFFICULTY_PRESETS[2].public_tests
+    for t in payload["public_test_inputs"]:
+        assert set(t.keys()) == {"input"}
+    # The authoritative payload adds the expected outputs.
+    full, _ = generate_with_solution("shape", 2, TEST_SECRET)
+    assert set(full.keys()) == {"function", "public_tests", "input_width", "budget"}
+    assert len(full["public_tests"]) == DIFFICULTY_PRESETS[2].public_tests
+    # The authoritative public tests use exactly the public-generated inputs
+    # (only the expected outputs are added by the verifier authority).
+    assert [t["input"] for t in full["public_tests"]] == [
+        c["input"] for c in generate("shape", 2)["public_test_inputs"]
+    ]
+    for t in full["public_tests"]:
         assert set(t.keys()) == {"input", "expected"}
         assert isinstance(t["expected"], int)
 
@@ -101,14 +120,21 @@ def test_public_seed_alone_cannot_reconstruct_hidden_tests() -> None:
 
 def test_solver_challenge_dict_has_no_secret_or_hidden_material() -> None:
     """A solver-visible challenge must never carry the secret/hidden material."""
+    import json
+
     payload, sol = generate_with_solution("bound", 3, TEST_SECRET)
-    challenge = build_challenge(TYPE_NAME, "bound", 3)
+    challenge = build_challenge(TYPE_NAME, "bound", 3, verifier_secret=TEST_SECRET)
     d = challenge.model_dump()
     assert VERIFIER_SECRET_KEY not in d
     assert "hidden_tests" not in str(d)
     assert sol["target_program"] not in str(d)
-    # The authoritative verifier injects the secret; the solver dict does not.
-    assert VERIFIER_SECRET_KEY not in d
+    # The solver-visible payload is exactly the public material; hidden tests
+    # and the target are only derivable with the verifier secret.
+    assert json.dumps(sol["target_program"]) not in json.dumps(challenge.payload)
+    # Without the secret, only the public-only part is produced.
+    public_only = build_challenge(TYPE_NAME, "bound", 3)
+    assert "public_test_inputs" in public_only.payload
+    assert "public_tests" not in public_only.payload
 
 
 def test_authoritative_verifier_rejects_when_solver_selfcheck_accepts() -> None:
@@ -140,7 +166,7 @@ def test_authoritative_verifier_rejects_when_solver_selfcheck_accepts() -> None:
         if not all(t["expected"] == first for t in payload["public_tests"]):
             continue
         constant = {"program": f"{first}"}
-        challenge = _bc(TYPE_NAME, seed, 3)
+        challenge = _bc(TYPE_NAME, seed, 3, verifier_secret=TEST_SECRET)
         submission = CandidateSubmission(
             challenge_id=challenge.id,
             system_id="t",
@@ -160,8 +186,8 @@ def test_authoritative_verifier_rejects_when_solver_selfcheck_accepts() -> None:
         # No constant overfitter found among these seeds. Assert the weaker but
         # still valid boundary: a candidate that fails hidden material must be
         # rejected by the authoritative path.
-        seed, payload = "overfit-a", generate_with_solution("overfit-a", 3, TEST_SECRET)[0]
-        challenge = _bc(TYPE_NAME, seed, 3)
+        seed = "overfit-a"
+        challenge = _bc(TYPE_NAME, seed, 3, verifier_secret=TEST_SECRET)
         submission = CandidateSubmission(
             challenge_id=challenge.id,
             system_id="t",
@@ -179,7 +205,7 @@ def test_authoritative_verifier_rejects_when_solver_selfcheck_accepts() -> None:
     # solver self-check (public-only) accepts it.
     seed, payload, first = found
     constant = {"program": f"{first}"}
-    challenge = _bc(TYPE_NAME, seed, 3)
+    challenge = _bc(TYPE_NAME, seed, 3, verifier_secret=TEST_SECRET)
     submission = CandidateSubmission(
         challenge_id=challenge.id,
         system_id="t",
@@ -192,6 +218,58 @@ def test_authoritative_verifier_rejects_when_solver_selfcheck_accepts() -> None:
     result = verify_submission(challenge, submission, verifier_secret=TEST_SECRET)
     assert result.valid is False
     assert result.error_code in (ErrorCode.INVALID_SOLUTION,)
+
+
+def test_public_seed_does_not_define_reference_target() -> None:
+    """The reference target is secret-bound: the public seed cannot recover it.
+
+    Contract (SPEC "Verifier material"):
+    - target generation requires a verifier secret;
+    - the same public (seed, difficulty) with different secrets yields
+      different reference target material;
+    - the solver-visible challenge carries none of that material.
+    """
+    from vica.challenges.synth_v01.family import _generate_target
+
+    # Same public seed + different secret => different reference target.
+    target_a, src_a = _generate_target("secret-a", "same-seed", 3)
+    target_b, src_b = _generate_target("secret-b", "same-seed", 3)
+    assert src_a != src_b
+    assert target_a != target_b
+
+    # The public payload alone (what a solver receives) contains no target.
+    payload, sol = generate_with_solution("same-seed", 3, TEST_SECRET)
+    public_only = generate("same-seed", 3)
+    assert sol["target_program"] not in str(public_only)
+    assert "public_tests" not in public_only
+
+    # A solver-visible challenge never carries the secret or the target.
+    ch = build_challenge(TYPE_NAME, "same-seed", 3, verifier_secret=TEST_SECRET)
+    d = ch.model_dump()
+    assert VERIFIER_SECRET_KEY not in d
+    assert sol["target_program"] not in str(d["payload"])
+
+
+def test_target_and_hidden_rng_are_domain_separated() -> None:
+    """The target and hidden-test RNGs must use different HMAC tags.
+
+    Even with the same verifier secret, ``target`` and ``hidden`` streams must
+    never share a PRNG state, so knowing hidden-test inputs cannot be used to
+    reconstruct the target stream (and vice-versa).
+    """
+    from vica.challenges.synth_v01.family import _hidden_rng, _target_rng
+
+    seed, difficulty = "domain-sep", 3
+    target_stream = _target_rng(TEST_SECRET, seed, difficulty)
+    hidden_stream = _hidden_rng(TEST_SECRET, seed, difficulty)
+    # Draw a few values from each; the streams must diverge immediately.
+    target_vals = [target_stream.randrange(1 << 30) for _ in range(8)]
+    hidden_vals = [hidden_stream.randrange(1 << 30) for _ in range(8)]
+    assert target_vals != hidden_vals
+
+    # A different tag must never collide with the target tag's stream.
+    other = _hidden_rng("unused-secret", seed, difficulty)
+    assert [other.randrange(1 << 30) for _ in range(8)] != target_vals
 
 
 def test_targets_are_non_trivial() -> None:

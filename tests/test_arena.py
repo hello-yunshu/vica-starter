@@ -8,7 +8,7 @@ from vica.arena.export import write_metrics_csv, write_runs_csv
 from vica.arena.leaderboard import format_leaderboard, leaderboard_rows
 from vica.arena.metrics import aggregate
 from vica.arena.runner import run_benchmark
-from vica.protocol.models import RunRecord
+from vica.protocol.models import RunRecord, SolveOutput
 from vica.storage.db import Storage
 
 
@@ -75,6 +75,59 @@ def test_difficulty_systems_override(tmp_db: str) -> None:
     d1_systems = {r.system_id for r in records if r.difficulty == 1}
     assert d2_systems == {"synth-random"}
     assert d1_systems == {"synth-random", "synth-brute"}
+
+
+class _NoCandidateSystem:
+    """Fake system for SPEC 7.1/7.2 error-semantics mapping tests."""
+
+    system_id = "fake-no-candidate"
+    supported_challenge_types: frozenset[str] = frozenset({"csp-v0.1"})
+
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    def solve(self, challenge: dict) -> SolveOutput:
+        return SolveOutput(candidate=None, metadata={"strategy": "fake", "status": self._status})
+
+    def config(self) -> dict:
+        return {"strategy": "fake", "status": self._status}
+
+
+@pytest.mark.parametrize(
+    "status,expected_code",
+    [
+        ("timeout", "TIMEOUT"),
+        ("provider_error", "INTERNAL_ERROR"),
+        ("transport_error", "INTERNAL_ERROR"),
+        ("parse_error", "INVALID_SOLUTION"),
+        ("no_candidate", "INVALID_SOLUTION"),
+    ],
+)
+def test_runner_maps_no_candidate_status(
+    tmp_db: str, status: str, expected_code: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SPEC 7.1/7.2: timeouts and provider failures never count as wrong answers."""
+    import vica.arena.runner as runner_mod
+
+    monkeypatch.setattr(
+        runner_mod,
+        "SYSTEM_FACTORIES",
+        {"fake": lambda: _NoCandidateSystem(status)},
+    )
+    experiment_id = run_benchmark(
+        challenge_type="csp-v0.1",
+        difficulties=[1],
+        systems=["fake"],
+        instances=1,
+        seed=3,
+        db_path=tmp_db,
+    )
+    storage = Storage(tmp_db)
+    records = storage.runs_to_records(experiment_id)
+    storage.close()
+    assert len(records) == 1
+    assert records[0].valid is False
+    assert records[0].error_code == expected_code
 
 
 def test_storage_roundtrip(tmp_db: str) -> None:
@@ -284,6 +337,151 @@ def test_unknown_system_raises(tmp_db: str) -> None:
             seed=1,
             db_path=tmp_db,
         )
+
+
+def test_system_config_is_experiment_scoped(tmp_db: str) -> None:
+    """System configs must be per-experiment snapshots, never overwritten."""
+    storage = Storage(tmp_db)
+    storage.save_system_config(
+        "exp-a", "llm", "llm", {"model": "model-a", "provider": "openai-compatible"}
+    )
+    storage.save_system_config(
+        "exp-b", "llm", "llm", {"model": "model-b", "provider": "openai-compatible"}
+    )
+    a = {c["system_id"]: c["config"] for c in storage.get_experiment_systems("exp-a")}
+    b = {c["system_id"]: c["config"] for c in storage.get_experiment_systems("exp-b")}
+    assert a["llm"]["model"] == "model-a"
+    assert b["llm"]["model"] == "model-b"
+    # Same system_id across two experiments must coexist without clobbering.
+    assert a["llm"] != b["llm"]
+    storage.close()
+
+
+def test_runner_persists_experiment_scoped_configs(
+    tmp_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner stores each experiment's own resolved config snapshot."""
+    import vica.arena.runner as runner_mod
+
+    class _Fake:
+        system_id = "fake"
+        supported_challenge_types: frozenset[str] = frozenset({"csp-v0.1"})
+
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def solve(self, challenge: dict) -> SolveOutput:
+            return SolveOutput(candidate={"A0": 1}, metadata={"strategy": "fake"})
+
+        def config(self) -> dict:
+            return {"system_name": self._name}
+
+    state = {"name": "A"}
+    monkeypatch.setattr(
+        runner_mod,
+        "SYSTEM_FACTORIES",
+        {"fake": lambda: _Fake(state["name"])},
+    )
+    exp_a = run_benchmark(
+        challenge_type="csp-v0.1", difficulties=[1], systems=["fake"],
+        instances=1, seed=1, db_path=tmp_db,
+    )
+    state["name"] = "B"
+    exp_b = run_benchmark(
+        challenge_type="csp-v0.1", difficulties=[1], systems=["fake"],
+        instances=1, seed=2, db_path=tmp_db,
+    )
+    storage = Storage(tmp_db)
+    cfg_a = {c["system_id"]: c["config"] for c in storage.get_experiment_systems(exp_a)}
+    cfg_b = {c["system_id"]: c["config"] for c in storage.get_experiment_systems(exp_b)}
+    storage.close()
+    assert cfg_a["fake"]["system_name"] == "A"
+    assert cfg_b["fake"]["system_name"] == "B"
+    assert cfg_a != cfg_b
+
+
+def test_legacy_schema_migrates_and_preserves_runs(tmp_db: str) -> None:
+    """A legacy DB (no experiment_systems) opens, upgrades, and keeps runs."""
+    import sqlite3
+
+    from vica.challenges.registry import build_challenge
+
+    # Build a legacy-schema DB: user_version=0, no experiment_systems table.
+    conn = sqlite3.connect(tmp_db)
+    conn.executescript(
+        """
+        CREATE TABLE experiments (
+            id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+            config_json TEXT NOT NULL, env_json TEXT, git_commit TEXT, vica_version TEXT
+        );
+        CREATE TABLE challenges (
+            id TEXT PRIMARY KEY, type TEXT NOT NULL, generator_version TEXT NOT NULL,
+            seed TEXT NOT NULL, difficulty INTEGER NOT NULL, payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE systems (
+            id TEXT PRIMARY KEY, type TEXT NOT NULL, config_json TEXT NOT NULL
+        );
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            experiment_id TEXT NOT NULL, challenge_id TEXT NOT NULL,
+            challenge_type TEXT NOT NULL, generator_version TEXT NOT NULL,
+            difficulty INTEGER NOT NULL, seed TEXT NOT NULL, system_id TEXT NOT NULL,
+            candidate_json TEXT NOT NULL, valid INTEGER NOT NULL, score REAL NOT NULL,
+            solve_wall_time_ms REAL NOT NULL, verify_time_us INTEGER NOT NULL,
+            error_code TEXT, metadata_json TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        """
+    )
+    ch = build_challenge("csp-v0.1", "legacy-seed", 1)
+    conn.execute(
+        "INSERT INTO experiments (id, created_at, config_json, env_json, git_commit, vica_version) "
+        "VALUES ('exp-legacy','now','{}',NULL,NULL,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO runs (experiment_id, challenge_id, challenge_type, generator_version, "
+        "difficulty, seed, system_id, candidate_json, valid, score, solve_wall_time_ms, "
+        "verify_time_us, error_code, metadata_json, created_at) "
+        "VALUES ('exp-legacy',?,?,?,?,?,?,?,?,?,?,?,?,?,'now')",
+        (
+            ch.id, ch.type, ch.generator_version, ch.difficulty, ch.seed,
+            "random", "{}", 1, 1.0, 1.5, 20, None, "{}",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening with the new Storage upgrades schema and preserves historical runs.
+    import vica.storage.db as dbmod
+
+    storage = Storage(tmp_db)
+    version = storage.conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version == dbmod._SCHEMA_VERSION
+    columns = {row[1] for row in storage.conn.execute("PRAGMA table_info(experiment_systems)")}
+    assert {"experiment_id", "system_id", "type", "config_json"} <= columns
+    runs = storage.runs_to_records("exp-legacy")
+    assert len(runs) == 1
+    assert runs[0].system_id == "random"
+    assert runs[0].valid is True
+    storage.close()
+
+
+def test_incompatible_challenge_system_pairing_fails_fast(tmp_db: str) -> None:
+    """z3 + synth is a config error: ValueError before any run is written."""
+    from pathlib import Path
+
+    assert not Path(tmp_db).exists()
+    with pytest.raises(ValueError, match="does not support challenge"):
+        run_benchmark(
+            challenge_type="synth-v0.1",
+            difficulties=[1],
+            systems=["z3"],
+            instances=1,
+            seed=1,
+            db_path=tmp_db,
+        )
+    # fail-fast happens before the DB is created: no run records, no storage.
+    assert not Path(tmp_db).exists()
 
 
 def test_synth_runner_produces_records(tmp_db: str) -> None:

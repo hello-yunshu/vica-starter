@@ -17,9 +17,28 @@ from vica.systems.llm.llm_solver import (
     _estimate_cost_usd,
     build_csp_prompt,
     build_synth_prompt,
+    classify_transport_status,
     parse_candidate_json,
     parse_synth_candidate,
 )
+
+
+class TestClassifyTransport:
+    @pytest.mark.parametrize(
+        "status,text,expected",
+        [
+            (200, "ok", "success"),
+            (408, "slow", "timeout"),
+            (429, "rate limited", "timeout"),
+            (504, "gateway", "timeout"),
+            (500, "boom", "provider_error"),
+            (401, "unauthorized", "provider_error"),
+            (0, "network_error: timeout", "timeout"),
+            (0, "network_error: [Errno 61] Connection refused", "transport_error"),
+        ],
+    )
+    def test_classify(self, status: int, text: str, expected: str) -> None:
+        assert classify_transport_status(status, text) == expected
 
 
 class TestPrompt:
@@ -139,6 +158,7 @@ class TestSolve:
         sys_ = LLMSolverSystem(model="test-model")
         out = sys_.solve({"payload": payload})
         assert out.candidate == expected_candidate
+        assert out.metadata["status"] == "success"
         assert out.metadata["input_tokens"] == 120
         assert out.metadata["output_tokens"] == 40
         assert out.metadata["attempts"] == 1
@@ -173,12 +193,58 @@ class TestSolve:
         sys_ = LLMSolverSystem(model="test-model", max_retries=1)
         out = sys_.solve({"payload": generate("llm-seed", 1)})
         assert out.candidate is None
+        assert out.metadata["status"] == "provider_error"
         assert out.metadata["last_error"] == "http_500"
+
+    def test_socket_timeout_is_not_a_wrong_answer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import vica.systems.llm.llm_solver as mod
+
+        monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
+        monkeypatch.setattr(
+            mod,
+            "_chat_completion",
+            lambda **kw: (0, "network_error: timeout: TimeoutError"),
+        )
+        sys_ = LLMSolverSystem(model="test-model", max_retries=1)
+        out = sys_.solve({"payload": generate("llm-seed", 1)})
+        assert out.candidate is None
+        assert out.metadata["status"] == "timeout"
+
+    def test_http_429_is_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import vica.systems.llm.llm_solver as mod
+
+        monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
+        monkeypatch.setattr(mod, "_chat_completion", lambda **kw: (429, "rate limit"))
+        sys_ = LLMSolverSystem(model="test-model")
+        out = sys_.solve({"payload": generate("llm-seed", 1)})
+        assert out.candidate is None
+        assert out.metadata["status"] == "timeout"
+
+    def test_config_never_exposes_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VICA_LLM_API_KEY", "secret-value")
+        sys_ = LLMSolverSystem(model="cfg-model")
+        cfg = sys_.config()
+        assert cfg["model"] == "cfg-model"
+        assert cfg["temperature"] == 0.0
+        assert "secret-value" not in str(cfg)
 
 
 class TestSynthPrompt:
+    def _solver_payload(self, seed: str, difficulty: int) -> dict:
+        """Solver-visible payload: signature, budget, and public examples.
+
+        Public expected outputs are only assembled by the verifier authority,
+        so tests build the payload via ``generate_with_solution`` (which
+        requires the verifier secret, as in the Evaluation Mode boundary).
+        """
+        from vica.challenges.synth_v01 import generate_with_solution
+
+        return generate_with_solution(seed, difficulty, "test-verifier-secret")[0]
+
     def test_prompt_includes_signature_and_examples(self) -> None:
-        payload = synth_generate("synth-seed", 2)
+        payload = self._solver_payload("synth-seed", 2)
         prompt = build_synth_prompt(payload)
         assert "f" in prompt
         assert "x" in prompt
@@ -186,7 +252,7 @@ class TestSynthPrompt:
         assert "x * 2 + 3" in prompt  # example output format
 
     def test_prompt_deterministic(self) -> None:
-        payload = synth_generate("synth-seed", 2)
+        payload = self._solver_payload("synth-seed", 2)
         assert build_synth_prompt(payload) == build_synth_prompt(payload)
 
 
@@ -219,6 +285,18 @@ class TestSynthOneShot:
 
     def test_mocked_transport_roundtrip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import vica.systems.llm.llm_solver as mod
+        from vica.challenges.synth_v01 import generate_with_solution
+        from vica.protocol.models import Challenge
+
+        payload, _ = generate_with_solution("synth-seed", 1, "test-verifier-secret")
+        challenge = Challenge(
+            id="c1",
+            type="synth-v0.1",
+            generator_version="0.1.0",
+            seed="synth-seed",
+            difficulty=1,
+            payload=payload,
+        )
 
         def fake_transport(**kw):
             assert kw.get("json_mode") is False
@@ -233,9 +311,10 @@ class TestSynthOneShot:
         monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
         monkeypatch.setattr(mod, "_chat_completion", fake_transport)
         sys_ = SynthLLMOneShotSystem(model="test-model")
-        out = sys_.solve({"payload": synth_generate("synth-seed", 1)})
+        out = sys_.solve(challenge.model_dump())
         assert out.candidate == {"program": "x + 1"}
         assert out.metadata["strategy"] == "llm-one-shot"
+        assert out.metadata["status"] == "success"
         assert out.metadata["input_tokens"] == 90
 
 
@@ -268,8 +347,18 @@ class TestSynthAgent:
 
     def test_agent_returns_none_when_never_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import vica.systems.llm.llm_solver as mod
+        from vica.challenges.synth_v01 import generate_with_solution
+        from vica.protocol.models import Challenge
 
-        payload = synth_generate("synth-seed", 1)
+        payload, _ = generate_with_solution("synth-seed", 1, "test-verifier-secret")
+        challenge = Challenge(
+            id="c1",
+            type="synth-v0.1",
+            generator_version="0.1.0",
+            seed="synth-seed",
+            difficulty=1,
+            payload=payload,
+        )
 
         def fake_transport(**kw):
             text = json.dumps(
@@ -280,6 +369,7 @@ class TestSynthAgent:
         monkeypatch.setenv("VICA_LLM_API_KEY", "test-key")
         monkeypatch.setattr(mod, "_chat_completion", fake_transport)
         sys_ = SynthLLMAgentSystem(model="test-model", max_rounds=2)
-        out = sys_.solve({"payload": payload})
+        out = sys_.solve(challenge.model_dump())
         assert out.candidate is None
         assert out.metadata["rounds"] == 2
+        assert out.metadata["status"] == "parse_error"
