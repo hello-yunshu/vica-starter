@@ -25,7 +25,6 @@ workspace that does not contain the verifier-private material.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import platform
 import secrets
@@ -61,6 +60,7 @@ from vica.systems.random.random_search import RandomSearchSystem
 from vica.systems.solver.z3_solver import Z3SolverSystem
 from vica.systems.synth.brute_force import BruteForceSynthSystem
 from vica.systems.synth.random_program import RandomProgramSystem
+from vica.verifier.material import MATERIAL_VERSION, material_id, verifier_material_commitment
 from vica.verifier.verifier import verify_submission
 
 SYSTEM_FACTORIES: dict[str, Any] = {
@@ -79,7 +79,9 @@ SYSTEM_FACTORIES: dict[str, Any] = {
 
 # Derivation scheme for secret-bound verifier material
 # (target seed + hidden test seed, HMAC-SHA256, domain-separated tags).
-VERIFIER_MATERIAL_VERSION = "synth-v0.1-hmac-sha256-target-hidden:v1"
+# Kept as an exported alias for back-compat; the authoritative definition
+# lives in vica.verifier.material.
+VERIFIER_MATERIAL_VERSION = MATERIAL_VERSION
 
 
 def available_systems() -> list[str]:
@@ -189,30 +191,33 @@ def _save_system_configs(
         )
 
 
-def _verifier_secret_for(db_path: str, experiment_id: str) -> tuple[str, str]:
-    """Resolve the experiment verifier secret and its public material id.
+def _verifier_secret_for(db_path: str, experiment_id: str) -> tuple[str, str, str]:
+    """Resolve the experiment verifier secret, its public material id, and its
+    full material commitment.
 
     The evaluator may fix the secret via ``VICA_VERIFIER_SECRET`` (same secret
     + same seed + same version => same target and hidden tests, enabling
     cross-machine reproducibility). Otherwise a fresh secret is drawn and
     persisted to the verifier-private path next to the database
     (``<db>.private/<experiment_id>.material.json``, mode 0600). The secret is
-    never stored in the experiment database; only the material id/version are.
+    never stored in the experiment database; only the public material
+    reference (full commitment + short id + version) is.
     """
-    version = VERIFIER_MATERIAL_VERSION
+    version = MATERIAL_VERSION
     secret = os.environ.get("VICA_VERIFIER_SECRET")
     if secret:
-        material_id = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
-        return secret, material_id
+        return secret, material_id(secret), verifier_material_commitment(secret)
     secret = secrets.token_hex(32)
-    material_id = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
+    commitment = verifier_material_commitment(secret)
+    mid = material_id(secret)
     private_dir = Path(db_path).parent / "private"
     private_dir.mkdir(parents=True, exist_ok=True)
     material_path = private_dir / f"{experiment_id}.material.json"
     material = {
         "experiment_id": experiment_id,
-        "verifier_material_id": material_id,
+        "verifier_material_id": mid,
         "verifier_material_version": version,
+        "verifier_material_commitment": commitment,
         "verifier_secret": secret,
     }
     material_path.write_text(canonical_json_bytes(material).decode("utf-8"))
@@ -220,7 +225,7 @@ def _verifier_secret_for(db_path: str, experiment_id: str) -> tuple[str, str]:
         material_path.chmod(0o600)
     except OSError:  # pragma: no cover - non-POSIX filesystems
         pass
-    return secret, material_id
+    return secret, mid, commitment
 
 
 def _all_difficulty_systems(difficulty_systems: dict[int, list[str]] | None) -> set[str]:
@@ -267,7 +272,9 @@ def run_benchmark(
     _validate_pairings(challenge_type, sorted(requested))
 
     experiment_id = experiment_id or f"exp-{uuid.uuid4().hex[:12]}"
-    verifier_secret, material_id = _verifier_secret_for(db_path, experiment_id)
+    verifier_secret, material_id, material_commitment = _verifier_secret_for(
+        db_path, experiment_id
+    )
     storage = Storage(db_path)
     try:
         config = {
@@ -278,9 +285,12 @@ def run_benchmark(
             "instances": instances,
             "seed": seed,
             # The active verifier secret is NEVER stored in the database. Only
-            # a public reference is kept; the secret lives in the verifier-
-            # private path (or is evaluator-provided via VICA_VERIFIER_SECRET).
-            # Solver workspaces must not contain the verifier-private material.
+            # the public material reference is kept: the full commitment
+            # (challenge identity binding), its short display id, and the
+            # material version. The secret lives in the verifier-private path
+            # (or is evaluator-provided via VICA_VERIFIER_SECRET). Solver
+            # workspaces must not contain the verifier-private material.
+            "verifier_material_commitment": material_commitment,
             "verifier_material_id": material_id,
             "verifier_material_version": VERIFIER_MATERIAL_VERSION,
         }
