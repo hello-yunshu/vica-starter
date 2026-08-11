@@ -133,7 +133,10 @@ def _status_for(error_code: ErrorCode | None, valid: bool) -> ReportStatus:
     if valid and error_code is None:
         return ReportStatus.VALID
     if error_code is None:
-        return ReportStatus.VALID
+        # valid=False with no error is an ambiguous / unclassified state; it must
+        # never silently become VALID. Callers that mean "no submission" or "no
+        # candidate" must pass the explicit status.
+        return ReportStatus.INTERNAL_ERROR
     mapping: dict[ErrorCode, ReportStatus] = {
         ErrorCode.INVALID_SCHEMA: ReportStatus.PARSE_ERROR,
         ErrorCode.WRONG_CHALLENGE: ReportStatus.NO_CANDIDATE,

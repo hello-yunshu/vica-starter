@@ -21,10 +21,17 @@ import json
 from pathlib import Path
 from typing import Any
 
-from vica.eval.bundle import load_public_manifest, load_verifier_material
+from vica.eval.bundle import (
+    load_private_manifest,
+    load_public_challenges,
+    load_public_manifest,
+    load_verifier_material,
+    validate_generator_version,
+    validate_verifier_material,
+)
 from vica.eval.metrics import summarize
 from vica.eval.models import EvaluationFailure, ReportStatus, ResultRecord, to_result_record
-from vica.eval.verify import load_result_bundle
+from vica.eval.verify import MAX_RESULT_FILE_BYTES, load_result_bundle
 from vica.protocol.models import CandidateSubmission, Challenge
 from vica.verifier.verifier import verify_submission
 
@@ -33,6 +40,19 @@ from vica.verifier.verifier import verify_submission
 _CHALLENGES = "challenges.jsonl"
 _SUBMISSIONS = "submissions.jsonl"
 _RESULTS = "results.jsonl"
+
+# Same solver-outcome mapping as verify (command-solver failures are re-derived
+# identically without calling the challenge verifier).
+_SOLVER_STATUS_MAP: dict[str, ReportStatus] = {
+    "timeout": ReportStatus.TIMEOUT,
+    "parse_error": ReportStatus.PARSE_ERROR,
+    "wrong_challenge_id": ReportStatus.PARSE_ERROR,
+    "no_candidate": ReportStatus.NO_CANDIDATE,
+    "nonzero_exit": ReportStatus.NO_CANDIDATE,
+    "output_too_large": ReportStatus.SANDBOX_ERROR,
+    "sandbox_error": ReportStatus.SANDBOX_ERROR,
+    "spawn_error": ReportStatus.SANDBOX_ERROR,
+}
 
 
 def reverify_bundle(
@@ -57,31 +77,43 @@ def reverify_bundle(
             "result bundle evaluation_id does not match the evaluation bundle"
         )
 
-    # Strict mode: the evaluation used for reverify must carry the same
-    # generator version and material commitment as the result bundle.
-    stored_gen = manifest.get("generator_version")
-    # The result manifest does not store the commitment directly; read it from
-    # the stored evaluation copy inside the bundle.
-    stored_eval = _read_json(root / "evaluation.json")
+    # The result manifest records the commitment directly; cross-check it
+    # against the stored evaluation copy and the current evaluation.
+    stored_eval = _read_json(root / "evaluation.json", root)
     stored_commit = _norm(stored_eval.get("verifier_material_commitment"))
+    manifest_commit = _norm(manifest.get("verifier_material_commitment"))
+    if manifest_commit != stored_commit or _norm(
+        pub.get("verifier_material_commitment")
+    ) != stored_commit:
+        raise EvaluationFailure(
+            "strict reverify refused: verifier material commitment mismatch between "
+            "evaluation, result manifest, and/or stored evaluation copy"
+        )
+
+    # Strict mode: same generator version (exact-version-only).
+    stored_gen = manifest.get("generator_version")
     if pub.get("generator_version") != stored_gen:
         raise EvaluationFailure(
             f"strict reverify refused: evaluation generator {pub.get('generator_version')!r} "
             f"!= result bundle {stored_gen!r}"
         )
-    if _norm(pub.get("verifier_material_commitment")) != stored_commit:
+    validate_generator_version(pub, str(pub.get("challenge_type")), stored_gen)
+
+    # Strict mode: the evaluation used for reverify must carry the same
+    # verifier material (including the actual secret confirming the commitment).
+    private_manifest = load_private_manifest(evaluation)
+    material = load_verifier_material(evaluation)
+    validate_verifier_material(pub, private_manifest, material)
+
+    # Strict mode: the stored challenge set must equal the evaluation's.
+    pub_challenges = load_public_challenges(evaluation)
+    stored_ids = [c["id"] for c in _read_jsonl(root / _CHALLENGES, root)]
+    if list(stored_ids) != [c["id"] for c in pub_challenges]:
         raise EvaluationFailure(
-            "strict reverify refused: verifier material commitment mismatch between "
-            "evaluation and result bundle"
+            "strict reverify refused: stored challenge ids do not match the evaluation"
         )
 
-    material = load_verifier_material(evaluation)
     verifier_secret = material.get("verifier_secret") or None
-    if manifest.get("evaluation_id") and pub.get("verifier_material_commitment") is not None:
-        if not verifier_secret:
-            raise EvaluationFailure(
-                "secret-bound evaluation has no verifier secret in the private material"
-            )
 
     if system_id is None:
         _system = manifest.get("system_id")
@@ -89,9 +121,9 @@ def reverify_bundle(
             raise EvaluationFailure("result bundle has no system_id; pass --system")
         system_id = _system
 
-    challenges = _read_jsonl(root / _CHALLENGES)
-    submissions = _read_jsonl(root / _SUBMISSIONS)
-    stored_results = _read_jsonl(root / _RESULTS)
+    challenges = _read_jsonl(root / _CHALLENGES, root)
+    submissions = _read_jsonl(root / _SUBMISSIONS, root)
+    stored_results = _read_jsonl(root / _RESULTS, root)
 
     submissions_by_id = {s["challenge_id"]: s for s in submissions}
     stored_by_id = {r["challenge_id"]: r for r in stored_results}
@@ -147,6 +179,28 @@ def _reverify_one(
     system_id: str,
     verifier_secret: str | None,
 ) -> ResultRecord:
+    runner = metadata.get("_vica_runner")
+    runner = runner if isinstance(runner, dict) else {}
+    solve_wall_time_ms = _as_float(runner.get("wall_time_ms"))
+    solver_status = runner.get("solver_status")
+
+    if candidate is None and solver_status is not None:
+        status = _SOLVER_STATUS_MAP.get(str(solver_status), ReportStatus.NO_CANDIDATE)
+        return to_result_record(
+            challenge_id=str(ch.get("id", "")),
+            challenge_type=ch.get("type", ""),
+            generator_version=str(ch.get("generator_version", "")),
+            difficulty=int(ch.get("difficulty", 0)),
+            seed=str(ch.get("seed", "")),
+            system_id=system_id,
+            valid=False,
+            score=0.0,
+            error_code=None,
+            solve_wall_time_ms=solve_wall_time_ms,
+            status=status,
+            metadata=dict(metadata),
+        )
+
     challenge = Challenge.model_validate(ch)
     submission = CandidateSubmission(
         challenge_id=challenge.id,
@@ -171,10 +225,18 @@ def _reverify_one(
         valid=result.valid,
         score=result.score,
         error_code=result.error_code,
+        solve_wall_time_ms=solve_wall_time_ms,
         verify_time_us=result.verify_time_us,
         candidate=candidate,
         metadata=meta,
     )
+
+
+def _as_float(v: Any) -> float:
+    try:
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _opt_optimal_score(ch: dict[str, Any]) -> float | None:
@@ -228,7 +290,11 @@ def _norm(v: Any) -> str | None:
     return str(v) if v is not None else None
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def _read_json(path: Path, root: Path) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        raise EvaluationFailure(f"unsafe/missing result bundle file {path.name}")
+    if path.stat().st_size > MAX_RESULT_FILE_BYTES:
+        raise EvaluationFailure(f"result bundle file {path.name} too large")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
@@ -238,12 +304,16 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        raise EvaluationFailure(f"missing file {path}")
+def _read_jsonl(path: Path, root: Path) -> list[dict[str, Any]]:
+    if not path.is_file() or path.is_symlink():
+        raise EvaluationFailure(f"unsafe/missing result bundle file {path.name}")
+    if path.stat().st_size > MAX_RESULT_FILE_BYTES:
+        raise EvaluationFailure(f"result bundle file {path.name} too large")
     result: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as fh:
         for line_no, line in enumerate(fh, 1):
+            if len(line.encode("utf-8")) > MAX_RESULT_FILE_BYTES:
+                raise EvaluationFailure(f"line {line_no} of {path} too large")
             stripped = line.strip()
             if not stripped:
                 continue

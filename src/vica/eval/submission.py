@@ -114,6 +114,12 @@ def load_submission_bundle(
         raise EvaluationFailure(f"{root} is not a Submission Bundle (missing manifest/submissions)")
 
     manifest = _read_json(manifest_path)
+    if manifest.get("submission_bundle_version") != SUBMISSION_BUNDLE_VERSION:
+        raise EvaluationFailure(
+            f"unsupported submission bundle version "
+            f"{manifest.get('submission_bundle_version')!r}; supported: "
+            f"{SUBMISSION_BUNDLE_VERSION!r}"
+        )
     expected = load_public_challenges(evaluation)
     expected_ids = {ch["id"] for ch in expected}
     evaluation_id = load_public_manifest(evaluation).get("evaluation_id")
@@ -126,6 +132,10 @@ def load_submission_bundle(
     rows: list[dict[str, Any]] = []
     with lines_path.open(encoding="utf-8") as fh:
         for line_no, line in enumerate(fh, 1):
+            if line_no > MAX_SUBMISSIONS:
+                raise EvaluationFailure(
+                    f"submission exceeds MAX_SUBMISSIONS={MAX_SUBMISSIONS}"
+                )
             if len(line.encode("utf-8")) > MAX_SUBMISSION_LINE_BYTES:
                 raise EvaluationFailure(f"submission line {line_no} too large")
             stripped = line.strip()

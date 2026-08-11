@@ -205,11 +205,40 @@ def _evaluation_id(
     return "eval-" + stable_hash(definition)[:12]
 
 
+def load_public_bundle(public_dir: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load a *public* Evaluation Bundle directory directly as ``(manifest,
+    challenges)``.
+
+    This is the loader for the External Command Solver / File Exchange client:
+    it consumes ``<evaluation>/public`` and never touches the private side.
+    Unlike :func:`load_public_manifest` / :func:`load_public_challenges` (which
+    take an evaluation *root* and resolve ``public/``), this takes the public
+    directory itself. For convenience it also accepts an evaluation *root*
+    (resolving ``public/``) so callers can pass either form.
+    """
+    root = Path(public_dir).resolve()
+    public_dir = root / PUBLIC_DIR if (root / PUBLIC_DIR).is_dir() else root
+    if not public_dir.is_dir():
+        raise EvaluationFailure(f"missing public bundle directory {root}")
+    manifest = _read_json(public_dir / PUBLIC_MANIFEST, max_bytes=MAX_MANIFEST_BYTES)
+    _check_manifest_hash(manifest, "public manifest")
+    _check_bundle_version(manifest, "public manifest", BUNDLE_FORMAT_VERSION)
+    challenges = _read_jsonl(public_dir / PUBLIC_CHALLENGES, MAX_CHALLENGES)
+    if _challenges_hash(challenges) != manifest.get("challenges_hash"):
+        raise EvaluationFailure(
+            "public challenges.jsonl does not match public manifest challenges_hash "
+            "(tampered or corrupted)"
+        )
+    _check_duplicate_ids(challenges)
+    return manifest, challenges
+
+
 def load_public_manifest(evaluation: str | Path) -> dict[str, Any]:
     """Load and integrity-check the public manifest of an evaluation bundle."""
     public_dir = _resolve_public_dir(evaluation)
     manifest = _read_json(public_dir / PUBLIC_MANIFEST, max_bytes=MAX_MANIFEST_BYTES)
     _check_manifest_hash(manifest, "public manifest")
+    _check_bundle_version(manifest, "public manifest", BUNDLE_FORMAT_VERSION)
     return manifest
 
 
@@ -217,6 +246,7 @@ def load_private_manifest(evaluation: str | Path) -> dict[str, Any]:
     private_dir = _resolve_private_dir(evaluation)
     manifest = _read_json(private_dir / PRIVATE_MANIFEST, max_bytes=MAX_MANIFEST_BYTES)
     _check_manifest_hash(manifest, "private manifest")
+    _check_bundle_version(manifest, "private manifest", BUNDLE_FORMAT_VERSION)
     return manifest
 
 
@@ -243,7 +273,15 @@ def load_public_challenges(evaluation: str | Path) -> list[dict[str, Any]]:
 
 
 def inspect_evaluation(evaluation: str | Path) -> dict[str, Any]:
-    """Validate an Evaluation Bundle (no solver is invoked)."""
+    """Validate an Evaluation Bundle (no solver is invoked).
+
+    ``vica eval inspect`` checks the whole bundle is usable for verification:
+    manifest hashes, challenge hash, public/private consistency, generator
+    version, and — for secret-bound families — that the private verifier
+    material is present, parseable, supported, and its actual secret commits
+    to the public commitment. Any failure sets ``status: FAIL`` (never an
+    obscure traceback).
+    """
     public_dir = _resolve_public_dir(evaluation)
     public_manifest = load_public_manifest(evaluation)
     private_manifest = load_private_manifest(evaluation)
@@ -264,6 +302,8 @@ def inspect_evaluation(evaluation: str | Path) -> dict[str, Any]:
         issues.append("private/public challenges_hash mismatch")
 
     commitment = public_manifest.get("verifier_material_commitment")
+    challenge_type = public_manifest.get("challenge_type")
+    generator_version = public_manifest.get("generator_version")
     for ch in challenges:
         if _commitment_str(ch.get("verifier_material_commitment")) != _commitment_str(
             commitment
@@ -271,12 +311,38 @@ def inspect_evaluation(evaluation: str | Path) -> dict[str, Any]:
             issues.append(f"challenge {ch.get('id')} has a different material commitment")
         if not isinstance(ch.get("id"), str) or not ch.get("id"):
             issues.append("challenge with missing/empty id")
+        if ch.get("type") != challenge_type:
+            issues.append(
+                f"challenge {ch.get('id')} type {ch.get('type')!r} != manifest {challenge_type!r}"
+            )
+        if ch.get("generator_version") != generator_version:
+            issues.append(
+                f"challenge {ch.get('id')} generator_version {ch.get('generator_version')!r} "
+                f"!= manifest {generator_version!r}"
+            )
+
+    # Generator version must be the one this build supports (exact-version-only).
+    try:
+        validate_generator_version(public_manifest, str(challenge_type), generator_version)
+    except (EvaluationFailure, ValueError) as exc:
+        issues.append(str(exc))
+
+    # For secret-bound families the private material must be usable.
+    try:
+        material = load_verifier_material(evaluation)
+    except EvaluationFailure as exc:
+        issues.append(str(exc))
+        material = {}
+    try:
+        validate_verifier_material(public_manifest, private_manifest, material)
+    except EvaluationFailure as exc:
+        issues.append(str(exc))
 
     return {
         "evaluation_id": public_manifest.get("evaluation_id"),
         "bundle_format_version": public_manifest.get("bundle_format_version"),
-        "challenge_type": public_manifest.get("challenge_type"),
-        "generator_version": public_manifest.get("generator_version"),
+        "challenge_type": challenge_type,
+        "generator_version": generator_version,
         "difficulties": public_manifest.get("difficulties"),
         "challenge_count": len(challenges),
         "public_manifest_hash": public_manifest.get("manifest_hash"),
@@ -296,9 +362,12 @@ def _commitment_str(v: Any) -> str | None:
 
 def _resolve_public_dir(evaluation: str | Path) -> Path:
     root = Path(evaluation).resolve()
-    public_dir = root / PUBLIC_DIR
+    # Accept both an evaluation root (…/public) and a public dir directly.
+    public_dir = root / PUBLIC_DIR if (root / PUBLIC_DIR).is_dir() else root
     if not public_dir.is_dir():
         raise EvaluationFailure(f"missing public directory in {root}")
+    if not (public_dir / PUBLIC_MANIFEST).is_file():
+        raise EvaluationFailure(f"missing public manifest in {public_dir}")
     return public_dir
 
 
@@ -316,6 +385,93 @@ def _check_manifest_hash(manifest: dict[str, Any], label: str) -> None:
         raise EvaluationFailure(f"{label} is missing manifest_hash")
     if _self_hash(manifest) != expected:
         raise EvaluationFailure(f"{label} manifest_hash mismatch (tampered or corrupted)")
+
+
+def _check_bundle_version(manifest: dict[str, Any], label: str, supported: str) -> None:
+    version = manifest.get("bundle_format_version")
+    if version != supported:
+        raise EvaluationFailure(
+            f"unsupported bundle format version {version!r} in {label}; "
+            f"supported: {supported!r}"
+        )
+
+
+def validate_verifier_material(
+    public_manifest: dict[str, Any],
+    private_manifest: dict[str, Any],
+    material: dict[str, Any],
+) -> None:
+    """Validate that the private verifier material can authoritatively verify
+    the public evaluation — before any solver is judged.
+
+    For a secret-bound evaluation this enforces, in order:
+        1. private manifest references this public manifest;
+        2. private/public challenges_hash match;
+        3. private manifest commitment == public commitment;
+        4. material file declares a verifier secret;
+        5. material version is supported;
+        6. material-file declared commitment == public commitment;
+        7. the commitment derived from the *actual* secret == public commitment.
+
+    Any failure raises :class:`EvaluationFailure` (an evaluator configuration
+    error, never a solver outcome). For non-secret-bound evaluations only the
+    public/private cross-checks (1–3) apply.
+    """
+    if private_manifest.get("public_manifest_hash") != public_manifest.get("manifest_hash"):
+        raise EvaluationFailure(
+            "private bundle does not reference this public manifest (wrong private material)"
+        )
+    if private_manifest.get("challenges_hash") != public_manifest.get("challenges_hash"):
+        raise EvaluationFailure("private/public challenges_hash mismatch")
+
+    commitment = _commitment_str(public_manifest.get("verifier_material_commitment"))
+    if commitment != _commitment_str(private_manifest.get("verifier_material_commitment")):
+        raise EvaluationFailure(
+            "verifier material commitment mismatch between public and private bundle "
+            "(wrong or missing verifier material)"
+        )
+
+    if commitment is None:
+        # Not secret-bound; nothing further to validate.
+        return
+
+    secret = material.get("verifier_secret")
+    if not isinstance(secret, str) or not secret:
+        raise EvaluationFailure(
+            "secret-bound evaluation has no verifier secret in the private material"
+        )
+
+    material_version = material.get("verifier_material_version")
+    if material_version != MATERIAL_VERSION:
+        raise EvaluationFailure(
+            f"unsupported verifier material version {material_version!r}; "
+            f"supported: {MATERIAL_VERSION!r}"
+        )
+
+    if _commitment_str(material.get("verifier_material_commitment")) != commitment:
+        raise EvaluationFailure(
+            "verifier-material.json does not commit to the evaluation's material"
+        )
+
+    derived = verifier_material_commitment(secret)
+    if derived != commitment:
+        raise EvaluationFailure(
+            "actual verifier secret does not match the evaluation's public commitment "
+            "(wrong verifier material)"
+        )
+
+
+def validate_generator_version(
+    manifest: dict[str, Any], challenge_type: str, generator_version: Any
+) -> None:
+    """Reject an evaluation whose generator version is not the one this build
+    supports. v0.2 uses exact-version-only (no legacy generator dispatch)."""
+    family = get_family(challenge_type)
+    if generator_version != family.generator_version:
+        raise EvaluationFailure(
+            f"unsupported historical generator version {generator_version!r} for "
+            f"{challenge_type!r}; supported: {family.generator_version!r}"
+        )
 
 
 def _check_duplicate_ids(challenges: list[dict[str, Any]], issues: list[str] | None = None) -> None:
@@ -415,8 +571,11 @@ __all__ = [
     "PRIVATE_MATERIAL",
     "inspect_evaluation",
     "load_private_manifest",
+    "load_public_bundle",
     "load_public_challenges",
     "load_public_manifest",
     "load_verifier_material",
     "prepare_evaluation",
+    "validate_generator_version",
+    "validate_verifier_material",
 ]

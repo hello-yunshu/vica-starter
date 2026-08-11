@@ -11,12 +11,14 @@ relies on a real LLM or network.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
 from vica.eval.bundle import (
+    inspect_evaluation,
     load_public_challenges,
     load_public_manifest,
     prepare_evaluation,
@@ -36,6 +38,10 @@ from vica.eval.verify import load_result_bundle, verify_evaluation
 _SECRET_A = "test-secret-aaaa"
 _SECRET_B = "test-secret-bbbb"
 _PY = sys.executable
+
+
+def _jsonl_rows(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def _prepare(
@@ -468,3 +474,283 @@ def test_command_solver_timeout(eval_csp: Path, tmp_path: Path) -> None:
     )
     assert summary["solved"] == 0
     assert summary["failures"][0]["error"] == "timeout"
+
+
+# ============================================ v0.2 stabilization regression tests
+
+
+def test_command_solver_does_not_inherit_verifier_secret(
+    eval_csp: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P0: the external command solver must not inherit host secrets."""
+    from vica.eval.command_solver import solve_with_command
+
+    for key in (
+        "VICA_VERIFIER_SECRET",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "TEST_PRIVATE_TOKEN",
+    ):
+        monkeypatch.setenv(key, "TOP-SECRET-VICA-MATERIAL")
+
+    script = (
+        "import json,sys,os; ch=json.load(sys.stdin)['challenge']; "
+        "leak=[k for k in os.environ if 'SECRET' in k or 'TOKEN' in k or 'API_KEY' in k]; "
+        "print(json.dumps({'challenge_id': ch['id'],'candidate':"
+        "{'assignment': {v: True for v in ch['payload'].get('variables',[])}},'metadata':"
+        "{'leaked': leak}}))"
+    )
+    sub = tmp_path / "sub"
+    summary = solve_with_command(
+        evaluation=eval_csp, command=f"{_PY} -c {script!r}", out=sub, system_id="cmd"
+    )
+    assert summary["solved"] == 6
+    # None of the host secrets may be visible to the child.
+    from vica.eval.submission import load_submission_bundle
+
+    _, loaded = load_submission_bundle(sub, eval_csp)
+    for row in loaded:
+        leaked = row["metadata"].get("leaked", [])
+        assert leaked == [], f"child process inherited host secrets: {leaked}"
+
+
+def test_command_solver_wrong_challenge_id_rejected(eval_csp: Path, tmp_path: Path) -> None:
+    """A returned challenge_id that does not match is a protocol failure."""
+    from vica.eval.command_solver import solve_with_command
+
+    script = (
+        "import json,sys; ch=json.load(sys.stdin)['challenge']; "
+        "print(json.dumps({'challenge_id': 'wrong', 'candidate': {}}))"
+    )
+    summary = solve_with_command(
+        evaluation=eval_csp, command=f"{_PY} -c {script!r}", out=tmp_path / "sub", system_id="cmd"
+    )
+    assert summary["solved"] == 0
+    assert all(f["error"] == "wrong_challenge_id" for f in summary["failures"])
+
+
+def test_command_solver_latency_recorded(eval_csp: Path, tmp_path: Path) -> None:
+    """Runner-measured wall time must flow into ResultRecord.solve_wall_time_ms."""
+    from vica.eval.command_solver import solve_with_command
+
+    script = (
+        "import json,sys,time; ch=json.load(sys.stdin)['challenge']; time.sleep(0.05); "
+        "print(json.dumps({'challenge_id': ch['id'],'candidate':"
+        "{'assignment': {v: True for v in ch['payload'].get('variables',[])}}}))"
+    )
+    sub = tmp_path / "sub"
+    summary = solve_with_command(
+        evaluation=eval_csp, command=f"{_PY} -c {script!r}", out=sub, system_id="cmd"
+    )
+    assert summary["solved"] == 6
+    assert all(p["wall_time_ms"] > 0 for p in summary["per_challenge"])
+
+    verify_evaluation(evaluation=eval_csp, submission=sub, out=tmp_path / "res")
+    results = _jsonl_rows(tmp_path / "res" / "results.jsonl")
+    assert all(r["solve_wall_time_ms"] > 0 for r in results)
+
+
+def test_failure_taxonomy_not_all_no_submission(eval_csp: Path, tmp_path: Path) -> None:
+    """Command-solver failures must not all collapse to NO_SUBMISSION."""
+    from vica.eval.submission import build_submission_bundle
+
+    challenges = load_public_challenges(eval_csp)
+    statuses = ["timeout", "parse_error", "no_candidate", "nonzero_exit", "output_too_large"]
+    rows = []
+    for i, ch in enumerate(challenges):
+        status = statuses[i % len(statuses)]
+        rows.append(
+            {
+                "challenge_id": ch["id"],
+                "candidate": None,
+                "metadata": {"_vica_runner": {"solver_status": status, "wall_time_ms": 1.0}},
+            }
+        )
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_csp, system_id="cmd", rows=rows, out=sub)
+    verify_evaluation(evaluation=eval_csp, submission=sub, out=tmp_path / "res")
+    results = _jsonl_rows(tmp_path / "res" / "results.jsonl")
+    statuses_seen = {r["status"] for r in results}
+    assert "no_submission" not in statuses_seen
+    assert {"timeout", "parse_error", "no_candidate", "sandbox_error"} & statuses_seen
+
+
+def test_verify_rejects_wrong_actual_secret_before_results(tmp_path: Path) -> None:
+    """A wrong actual verifier secret is an evaluator error, fail-fast, and
+    must not leave a misleading result artifact behind."""
+    ev = tmp_path / "eval"
+    _prepare(ev, family="synth-v0.1", instances=2, secret=_SECRET_A)
+    # Tamper only the actual secret, keeping the declared commitment.
+    material = ev / "private" / "verifier-material.json"
+    obj = json.loads(material.read_text())
+    obj["verifier_secret"] = _SECRET_B
+    material.write_text(json.dumps(obj))
+
+    with pytest.raises(EvaluationFailure):
+        verify_evaluation(evaluation=ev, submission=tmp_path / "sub", out=tmp_path / "res")
+    # inspect reports FAIL (never a traceback) and verify must not leave artifacts.
+    info = inspect_evaluation(ev)
+    assert info["ok"] is False
+    assert not (tmp_path / "res").exists()
+
+
+def test_reverify_rejects_wrong_actual_secret(tmp_path: Path) -> None:
+    from vica.eval.command_solver import solve_with_command
+
+    ev = tmp_path / "eval"
+    _prepare(ev, family="synth-v0.1", instances=2, secret=_SECRET_A)
+    script = (
+        "import json,sys; ch=json.load(sys.stdin)['challenge']; "
+        "print(json.dumps({'challenge_id': ch['id'],'candidate': [],'metadata':{}}))"
+    )
+    sub = tmp_path / "sub"
+    solve_with_command(evaluation=ev, command=f"{_PY} -c {script!r}", out=sub, system_id="cmd")
+    res = tmp_path / "res"
+    verify_evaluation(evaluation=ev, submission=sub, out=res)
+
+    material = ev / "private" / "verifier-material.json"
+    obj = json.loads(material.read_text())
+    obj["verifier_secret"] = _SECRET_B
+    material.write_text(json.dumps(obj))
+
+    with pytest.raises(EvaluationFailure):
+        reverify_bundle(res, ev)
+
+
+def test_unsupported_submission_bundle_version_rejected(eval_csp: Path, tmp_path: Path) -> None:
+    from vica.eval.submission import build_submission_bundle
+
+    challenges = load_public_challenges(eval_csp)
+    rows = [
+        {"challenge_id": ch["id"], "candidate": None, "metadata": {}}
+        for ch in challenges
+    ]
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_csp, system_id="x", rows=rows, out=sub)
+    manifest = json.loads((sub / "manifest.json").read_text())
+    manifest["submission_bundle_version"] = "999"
+    (sub / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(EvaluationFailure):
+        verify_evaluation(evaluation=eval_csp, submission=sub, out=tmp_path / "res")
+
+
+def test_unsupported_result_bundle_version_rejected(eval_synth: Path, tmp_path: Path) -> None:
+    from vica.eval.submission import build_submission_bundle
+
+    rows = _rows_for(eval_synth)
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_synth, system_id="x", rows=rows, out=sub)
+    res = tmp_path / "res"
+    verify_evaluation(evaluation=eval_synth, submission=sub, out=res)
+    manifest = json.loads((res / "manifest.json").read_text())
+    manifest["result_bundle_version"] = "999"
+    (res / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(EvaluationFailure):
+        load_result_bundle(res)
+
+
+def test_unsupported_evaluation_bundle_format_rejected(eval_csp: Path) -> None:
+    manifest_path = eval_csp / "public" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["bundle_format_version"] = "999"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(EvaluationFailure):
+        load_public_manifest(eval_csp)
+
+
+def test_unsupported_generator_version_rejected() -> None:
+    from vica.eval.bundle import validate_generator_version
+
+    with pytest.raises(EvaluationFailure):
+        validate_generator_version(
+            {"challenge_type": "csp-v0.1"}, "csp-v0.1", "0.0.1"
+        )
+
+
+def test_challenge_row_generator_version_mismatch_rejected(tmp_path: Path) -> None:
+    _prepare(tmp_path / "eval", family="csp-v0.1", instances=1)
+    challenges_path = tmp_path / "eval" / "public" / "challenges.jsonl"
+    lines = challenges_path.read_text().strip().splitlines()
+    obj = json.loads(lines[0])
+    obj["generator_version"] = "0.0.1"
+    challenges_path.write_text("\n".join(json.dumps(o) for o in [obj]) + "\n")
+    info = inspect_evaluation(tmp_path / "eval")
+    assert info["ok"] is False
+    assert any("generator_version" in issue for issue in info["issues"])
+
+
+def test_result_bundle_path_traversal_rejected(eval_synth: Path, tmp_path: Path) -> None:
+    from vica.eval.submission import build_submission_bundle
+    from vica.protocol.serialization import stable_hash
+
+    rows = _rows_for(eval_synth)
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_synth, system_id="x", rows=rows, out=sub)
+    res = tmp_path / "res"
+    verify_evaluation(evaluation=eval_synth, submission=sub, out=res)
+    manifest = json.loads((res / "manifest.json").read_text())
+    manifest["files"]["../../outside.txt"] = "sha256:" + "0" * 64
+    # Recompute the bundle hash so the *path* check (not the hash check) is what
+    # rejects the malicious entry.
+    without = {k: v for k, v in manifest.items() if k != "bundle_hash"}
+    manifest["bundle_hash"] = stable_hash(without)
+    (res / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(EvaluationFailure):
+        load_result_bundle(res)
+
+
+def test_result_bundle_symlink_escape_rejected(
+    eval_synth: Path, tmp_path: Path
+) -> None:
+    from vica.eval.submission import build_submission_bundle
+
+    rows = _rows_for(eval_synth)
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_synth, system_id="x", rows=rows, out=sub)
+    res = tmp_path / "res"
+    verify_evaluation(evaluation=eval_synth, submission=sub, out=res)
+    os.remove(res / "results.jsonl")
+    os.symlink(tmp_path / "outside", res / "results.jsonl")
+    with pytest.raises(EvaluationFailure):
+        load_result_bundle(res)
+
+
+def test_submission_exceeds_max_submissions_rejected(
+    eval_csp: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import vica.eval.submission as submission_mod
+
+    challenges = load_public_challenges(eval_csp)
+    rows = [{"challenge_id": ch["id"], "candidate": None, "metadata": {}} for ch in challenges]
+    sub = tmp_path / "sub"
+    submission_mod.build_submission_bundle(evaluation=eval_csp, system_id="x", rows=rows, out=sub)
+    # Force a tiny limit so 6 rows exceed it.
+    monkeypatch.setattr(submission_mod, "MAX_SUBMISSIONS", 3)
+    with pytest.raises(EvaluationFailure):
+        submission_mod.load_submission_bundle(sub, eval_csp)
+
+
+def test_result_bundle_oversized_file_rejected(
+    eval_synth: Path, tmp_path: Path
+) -> None:
+    from vica.eval.submission import build_submission_bundle
+
+    rows = _rows_for(eval_synth)
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_synth, system_id="x", rows=rows, out=sub)
+    res = tmp_path / "res"
+    verify_evaluation(evaluation=eval_synth, submission=sub, out=res)
+    with (res / "results.jsonl").open("a") as fh:
+        fh.write("x" * 100_000 + "\n")
+    with pytest.raises(EvaluationFailure):
+        load_result_bundle(res)
+
+
+def test_package_version_matches_pyproject() -> None:
+    import tomllib
+
+    import vica
+
+    with open("pyproject.toml", "rb") as fh:
+        pyproject = tomllib.load(fh)
+    assert vica.__version__ == pyproject["project"]["version"] == "0.2.0"
