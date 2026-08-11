@@ -13,27 +13,57 @@ Protocol (v0.2, deliberately minimal — no RPC):
                                                        payload}}
     stdout -> {"challenge_id": "...", "candidate": ..., "metadata": {...}}
 
-The runner measures wall time, exit code, and stdout/stderr sizes. Candidate
-JSON that fails to parse is recorded as a per-instance failure so one bad
-line never discards the whole batch. timeout / nonzero exit / oversized output
-are normal solver outcomes, not evaluation failures.
+Security & provenance guarantees:
+
+- The child runs under the sandbox's safe child environment (an allowlist, not
+  ``os.environ``), so evaluator secrets (``VICA_VERIFIER_SECRET``, API keys,
+  tokens) are **never** inherited by the external solver.
+- The child runs in its own process group with a real wall-clock timeout and a
+  bounded streaming output read (SIGKILL on timeout / overflow), so a runaway
+  solver cannot exhaust host memory or leak a detached process.
+- The returned ``challenge_id`` is validated against the one we sent: a
+  mismatched id is a protocol failure (``parse_error``), never silently
+  accepted as a valid candidate for a different challenge.
+- Solver failures (timeout / parse_error / nonzero_exit / output overflow /
+  empty output) are recorded as **per-instance solver outcomes** in the
+  Submission Bundle (``metadata._vica_runner.solver_status``). They are never
+  collapsed into ``NO_SUBMISSION`` (which means "no row was submitted at all")
+  and never reported as ``INVALID_SOLUTION`` (a wrong answer).
+
+The runner measures wall time; that latency is trusted runner telemetry and is
+carried into ``ResultRecord.solve_wall_time_ms`` at verify time.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-from vica.eval.bundle import load_public_challenges, load_public_manifest
-from vica.eval.models import EvaluationFailure
+from vica.eval.bundle import load_public_bundle
+from vica.eval.models import EvaluationFailure, ReportStatus
 from vica.eval.submission import build_submission_bundle
+from vica.sandbox.runner import SandboxLimits, run_sandboxed
 
 PROTOCOL_VERSION = "0.2"
 DEFAULT_TIMEOUT_S = 120.0
 MAX_CANDIDATE_BYTES = 1 << 20
+
+# The command solver is a *bounded external process runner*, not a hardened
+# sandbox. We keep the sandbox's safe environment, process group, wall timeout
+# and bounded output, but do not impose CPU/memory/FD/file rlimits that would
+# break an ordinary user-provided command on a normal dev machine (macOS).
+def _solver_limits(timeout_s: float) -> SandboxLimits:
+    return SandboxLimits(
+        cpu_seconds=0.0,
+        wall_seconds=timeout_s,
+        memory_bytes=0,
+        max_processes=0,
+        max_fds=0,
+        max_output_bytes=MAX_CANDIDATE_BYTES,
+        max_file_bytes=0,
+    )
 
 
 def solve_with_command(
@@ -47,37 +77,37 @@ def solve_with_command(
     """Run *command* once per public challenge and produce a Submission Bundle.
 
     Returns a summary including per-challenge solve metadata (wall time, exit
-    code, stdout/stderr size). Solver failures are captured per instance; the
-    Submission Bundle is still produced so verification can classify them.
+    code, stdout/stderr size). Every challenge gets a row in the Submission
+    Bundle — a solver failure is recorded as a per-instance solver outcome
+    (``metadata._vica_runner.solver_status``), never as a missing submission.
     """
     if not command.strip():
         raise EvaluationFailure("command must not be empty")
-    challenges = load_public_challenges(evaluation)
-    evaluation_id = load_public_manifest(evaluation).get("evaluation_id")
+    public_manifest, challenges = load_public_bundle(evaluation)
+    evaluation_id = public_manifest.get("evaluation_id")
 
     rows: list[dict[str, Any]] = []
     per_challenge: list[dict[str, Any]] = []
     for ch in challenges:
         info = _run_one(command, ch, timeout_s)
         per_challenge.append(info)
-        if info["exit_ok"] and info["candidate"] is not None:
-            rows.append(
-                {
-                    "challenge_id": ch["id"],
-                    "candidate": info["candidate"],
-                    "metadata": {
-                        "solver_command": command,
-                        "wall_time_ms": info["wall_time_ms"],
-                        "exit_code": info["exit_code"],
-                        "stdout_bytes": info["stdout_bytes"],
-                        "stderr_bytes": info["stderr_bytes"],
-                    },
-                }
-            )
-        else:
-            # No usable candidate for this challenge: leave it out so verify
-            # records NO_SUBMISSION (never confuse with INVALID_SOLUTION).
-            pass
+        runner_meta: dict[str, Any] = {
+            "solver_status": info["solver_status"].value if info["solver_status"] else None,
+            "wall_time_ms": info["wall_time_ms"],
+            "exit_code": info["exit_code"],
+            "stdout_bytes": info["stdout_bytes"],
+            "stderr_bytes": info["stderr_bytes"],
+        }
+        rows.append(
+            {
+                "challenge_id": ch["id"],
+                "candidate": info["candidate"],
+                "metadata": {
+                    "solver_command": command,
+                    "_vica_runner": runner_meta,
+                },
+            }
+        )
 
     result = build_submission_bundle(
         evaluation=evaluation, system_id=system_id, rows=rows, out=out
@@ -85,7 +115,10 @@ def solve_with_command(
     result["evaluation_id"] = evaluation_id
     result["solved"] = len([p for p in per_challenge if p["candidate"] is not None])
     result["failures"] = [
-        {k: p[k] for k in ("challenge_id", "exit_ok", "exit_code", "error")}
+        {
+            k: p[k]
+            for k in ("challenge_id", "exit_ok", "exit_code", "error", "solver_status")
+        }
         for p in per_challenge
         if not p["exit_ok"] or p["candidate"] is None
     ]
@@ -94,10 +127,11 @@ def solve_with_command(
 
 
 def _run_one(command: str, ch: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+    expected_id = str(ch.get("id"))
     payload = {
         "protocol_version": PROTOCOL_VERSION,
         "challenge": {
-            "id": ch.get("id"),
+            "id": expected_id,
             "type": ch.get("type"),
             "generator_version": ch.get("generator_version"),
             "seed": ch.get("seed"),
@@ -106,88 +140,76 @@ def _run_one(command: str, ch: dict[str, Any], timeout_s: float) -> dict[str, An
             "payload": ch.get("payload"),
         },
     }
-    input_bytes = json.dumps(payload).encode("utf-8")
+    input_text = json.dumps(payload)
+
     start = time.perf_counter()
-    try:
-        proc = subprocess.run(
-            command,
-            input=input_bytes,
-            capture_output=True,
-            timeout=timeout_s,
-            shell=True,
-        )
-        wall_ms = (time.perf_counter() - start) * 1000.0
-    except subprocess.TimeoutExpired:
-        return {
-            "challenge_id": ch.get("id"),
-            "exit_ok": False,
-            "exit_code": None,
-            "wall_time_ms": (time.perf_counter() - start) * 1000.0,
-            "stdout_bytes": 0,
-            "stderr_bytes": 0,
-            "candidate": None,
-            "error": "timeout",
-        }
-    except OSError as exc:  # pragma: no cover - shell spawn failure
-        return {
-            "challenge_id": ch.get("id"),
-            "exit_ok": False,
-            "exit_code": None,
-            "wall_time_ms": (time.perf_counter() - start) * 1000.0,
-            "stdout_bytes": 0,
-            "stderr_bytes": 0,
-            "candidate": None,
-            "error": f"spawn_error: {exc}",
-        }
+    result = run_sandboxed(
+        ["/bin/sh", "-c", command],
+        stdin=input_text,
+        limits=_solver_limits(timeout_s),
+    )
+    wall_ms = (time.perf_counter() - start) * 1000.0
 
-    stdout = proc.stdout
-    if len(stdout) > MAX_CANDIDATE_BYTES:
-        return {
-            "challenge_id": ch.get("id"),
-            "exit_ok": False,
-            "exit_code": proc.returncode,
-            "wall_time_ms": wall_ms,
-            "stdout_bytes": len(stdout),
-            "stderr_bytes": len(proc.stderr),
-            "candidate": None,
-            "error": "output_too_large",
-        }
-    if proc.returncode != 0:
-        return {
-            "challenge_id": ch.get("id"),
-            "exit_ok": False,
-            "exit_code": proc.returncode,
-            "wall_time_ms": wall_ms,
-            "stdout_bytes": len(stdout),
-            "stderr_bytes": len(proc.stderr),
-            "candidate": None,
-            "error": "nonzero_exit",
-        }
-
-    parsed = _parse_candidate(stdout)
-    return {
-        "challenge_id": ch.get("id"),
-        "exit_ok": parsed is not None,
-        "exit_code": proc.returncode,
+    info: dict[str, Any] = {
+        "challenge_id": expected_id,
+        "exit_ok": False,
+        "exit_code": result.returncode,
         "wall_time_ms": wall_ms,
-        "stdout_bytes": len(stdout),
-        "stderr_bytes": len(proc.stderr),
-        "candidate": parsed.get("candidate") if isinstance(parsed, dict) else None,
-        "error": None if parsed is not None else "parse_error",
+        "stdout_bytes": len(result.stdout.encode("utf-8")),
+        "stderr_bytes": len(result.stderr.encode("utf-8")),
+        "candidate": None,
+        "error": None,
+        "solver_status": None,
     }
 
+    if result.timed_out:
+        info["error"] = "timeout"
+        info["solver_status"] = ReportStatus.TIMEOUT
+        return info
+    if result.metadata.get("output_overflow"):
+        info["error"] = "output_too_large"
+        info["solver_status"] = ReportStatus.SANDBOX_ERROR
+        return info
+    if result.error_code is not None:
+        info["error"] = "sandbox_error"
+        info["solver_status"] = ReportStatus.SANDBOX_ERROR
+        return info
+    if result.returncode != 0:
+        info["error"] = "nonzero_exit"
+        info["solver_status"] = ReportStatus.NO_CANDIDATE
+        return info
 
-def _parse_candidate(stdout: bytes) -> dict[str, Any] | None:
-    text = stdout.decode("utf-8", errors="replace").strip()
+    obj, parse_error = _parse_candidate(result.stdout, expected_id)
+    if parse_error is not None or obj is None:
+        info["error"] = parse_error or "no_candidate"
+        info["solver_status"] = ReportStatus.PARSE_ERROR
+        return info
+
+    info["exit_ok"] = True
+    info["candidate"] = obj["candidate"]
+    return info
+
+
+def _parse_candidate(stdout: str, expected_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse the solver's stdout as a protocol response.
+
+    Returns ``(obj, None)`` on a well-formed response whose ``challenge_id``
+    matches *expected_id*, else ``(None, error)`` where *error* classifies the
+    failure (``no_candidate`` for empty output, ``parse_error`` for malformed
+    JSON or a mismatched ``challenge_id``).
+    """
+    text = stdout.strip()
     if not text:
-        return None
+        return None, "no_candidate"
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        return None, "parse_error"
     if not isinstance(obj, dict) or "candidate" not in obj:
-        return None
-    return obj
+        return None, "parse_error"
+    if str(obj.get("challenge_id")) != expected_id:
+        return None, "wrong_challenge_id"
+    return obj, None
 
 
 __all__ = ["DEFAULT_TIMEOUT_S", "PROTOCOL_VERSION", "solve_with_command"]
