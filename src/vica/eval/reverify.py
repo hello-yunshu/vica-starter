@@ -33,6 +33,7 @@ from vica.eval.metrics import summarize
 from vica.eval.models import EvaluationFailure, ReportStatus, ResultRecord, to_result_record
 from vica.eval.verify import MAX_RESULT_FILE_BYTES, load_result_bundle
 from vica.protocol.models import CandidateSubmission, Challenge
+from vica.protocol.serialization import stable_hash
 from vica.verifier.verifier import verify_submission
 
 # The Result Bundle stores its own copy of the challenges and raw submissions,
@@ -105,12 +106,20 @@ def reverify_bundle(
     material = load_verifier_material(evaluation)
     validate_verifier_material(pub, private_manifest, material)
 
-    # Strict mode: the stored challenge set must equal the evaluation's.
+    # Strict mode: the stored challenge *content* must be identical to the
+    # authoritative evaluation's, and both must match the declared
+    # challenges_hash. Comparing only ids is not enough — a tampered Result
+    # Bundle could renumber its own challenges.jsonl and re-hash it.
     pub_challenges = load_public_challenges(evaluation)
-    stored_ids = [c["id"] for c in _read_jsonl(root / _CHALLENGES, root)]
-    if list(stored_ids) != [c["id"] for c in pub_challenges]:
+    stored_challenges = _read_jsonl(root / _CHALLENGES, root)
+    declared_hash = pub.get("challenges_hash")
+    if (
+        stable_hash(stored_challenges) != declared_hash
+        or stable_hash(pub_challenges) != declared_hash
+    ):
         raise EvaluationFailure(
-            "strict reverify refused: stored challenge ids do not match the evaluation"
+            "strict reverify refused: stored challenges do not match the "
+            "authoritative evaluation (challenge content hash mismatch)"
         )
 
     verifier_secret = material.get("verifier_secret") or None
@@ -121,7 +130,9 @@ def reverify_bundle(
             raise EvaluationFailure("result bundle has no system_id; pass --system")
         system_id = _system
 
-    challenges = _read_jsonl(root / _CHALLENGES, root)
+    # Reverify against the *authoritative* evaluation challenges (the stored
+    # copy is only for provenance / cross-check, never authoritative).
+    challenges = pub_challenges
     submissions = _read_jsonl(root / _SUBMISSIONS, root)
     stored_results = _read_jsonl(root / _RESULTS, root)
 
@@ -257,15 +268,21 @@ def _opt_optimal_score(ch: dict[str, Any]) -> float | None:
 def _compare(stored: dict[str, Any], recomputed: ResultRecord) -> dict[str, Any] | None:
     """Compare the recomputed result against the stored one.
 
-    Only the deterministic semantics (valid / score / error_code) must match;
-    solve_wall_time_ms / verify_time_us are telemetry and may differ.
+    Only the deterministic semantics — challenge identity, valid / score /
+    error_code, and the report *status* — must match. ``status`` is compared
+    because distinct failure semantics (TIMEOUT / PARSE_ERROR / NO_CANDIDATE /
+    NO_SUBMISSION / SANDBOX_ERROR) can share valid=False / score=0 /
+    error_code=None. solve_wall_time_ms / verify_time_us are telemetry and may
+    differ.
     """
     stored_code = stored.get("error_code")
     recomputed_code = recomputed.error_code.value if recomputed.error_code else None
     if (
-        stored.get("valid") == recomputed.valid
+        stored.get("challenge_id") == recomputed.challenge_id
+        and stored.get("valid") == recomputed.valid
         and _norm_score(stored.get("score")) == _norm_score(recomputed.score)
         and stored_code == recomputed_code
+        and stored.get("status") == recomputed.status.value
     ):
         return None
     return {
@@ -276,6 +293,8 @@ def _compare(stored: dict[str, Any], recomputed: ResultRecord) -> dict[str, Any]
         "recomputed_score": recomputed.score,
         "stored_error_code": stored_code,
         "recomputed_error_code": recomputed_code,
+        "stored_status": stored.get("status"),
+        "recomputed_status": recomputed.status.value,
     }
 
 

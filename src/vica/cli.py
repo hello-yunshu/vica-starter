@@ -308,13 +308,25 @@ def eval_verify(
         str | None,
         typer.Option("--system", help="system id (default: submission manifest system_id)"),
     ] = None,
+    trust_runner_telemetry: Annotated[
+        bool,
+        typer.Option(
+            "--trust-runner-telemetry",
+            help="trust reserved _vica_* runner telemetry (only for a VICA "
+            "command-solver artifact; never for a file-exchange submission)",
+        ),
+    ] = False,
 ) -> None:
     """Authoritatively verify a submission and write a Result Bundle."""
     from vica.eval.verify import verify_evaluation
 
     try:
         summary = verify_evaluation(
-            evaluation=evaluation, submission=submission, out=out, system_id=system
+            evaluation=evaluation,
+            submission=submission,
+            out=out,
+            system_id=system,
+            trusted_runner_telemetry=trust_runner_telemetry,
         )
     except Exception as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -372,7 +384,7 @@ def solver_run(
 @app.command()
 def reverify(
     result_bundle: Annotated[Path, typer.Argument(help="result bundle directory")],
-    evaluation: Annotated[Path, typer.Option(help="evaluation bundle (private) directory")],
+    evaluation: Annotated[Path, typer.Option(help="evaluation bundle root directory")],
     system: Annotated[
         str | None,
         typer.Option("--system", help="system id (default: result bundle system_id)"),

@@ -61,7 +61,30 @@ RESULT_FILE_ALLOWLIST = (
     "metrics.json",
     "report.md",
 )
+# Every file the manifest must account for (manifest.json itself is covered by
+# bundle_hash, not the files map). A Result Bundle is only loadable when the
+# manifest's files map is exactly this set.
+REQUIRED_RESULT_FILES = (
+    "evaluation.json",
+    "system.json",
+    "environment.json",
+    "challenges.jsonl",
+    "submissions.jsonl",
+    "results.jsonl",
+    "metrics.json",
+    "report.md",
+)
 MAX_RESULT_FILE_BYTES = 64 << 20
+
+
+def _valid_file_hash(expected: Any) -> bool:
+    """True only for a well-formed ``sha256:<64 hex>`` digest."""
+    return (
+        isinstance(expected, str)
+        and expected.startswith("sha256:")
+        and len(expected) == len("sha256:") + 64
+        and all(c in "0123456789abcdefABCDEF" for c in expected[len("sha256:"):])
+    )
 
 
 def verify_evaluation(
@@ -70,9 +93,16 @@ def verify_evaluation(
     submission: str | Path,
     out: str | Path,
     system_id: str | None = None,
+    trusted_runner_telemetry: bool = False,
 ) -> dict[str, Any]:
     """Authoritatively verify a Submission Bundle against an Evaluation and
-    write a Result Bundle to *out*. Returns a summary (no secrets)."""
+    write a Result Bundle to *out*. Returns a summary (no secrets).
+
+    ``trusted_runner_telemetry`` opts into trusting reserved ``_vica_*``
+    runner telemetry in the submission — only for a VICA-owned Command Solver
+    artifact. File-exchange submissions (default) may never carry trusted
+    runner provenance.
+    """
     public_manifest = load_public_manifest(evaluation)
     private_manifest = load_private_manifest(evaluation)
     material = load_verifier_material(evaluation)
@@ -88,7 +118,9 @@ def verify_evaluation(
     validate_generator_version(public_manifest, str(challenge_type), generator_version)
     _check_challenge_rows(challenges, challenge_type, generator_version)
 
-    sub_manifest, rows = load_submission_bundle(submission, evaluation)
+    sub_manifest, rows = load_submission_bundle(
+        submission, evaluation, trusted_runner_telemetry=trusted_runner_telemetry
+    )
     if system_id is None:
         _system = sub_manifest.get("system_id")
         if not isinstance(_system, str) or not _system:
@@ -356,6 +388,8 @@ def load_result_bundle(result_bundle: str | Path) -> dict[str, Any]:
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         raise EvaluationFailure(f"{root} is not a Result Bundle (missing manifest.json)")
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise EvaluationFailure("result bundle manifest must be a regular file")
     if manifest_path.stat().st_size > MAX_RESULT_FILE_BYTES:
         raise EvaluationFailure("result bundle manifest is too large")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -372,10 +406,19 @@ def load_result_bundle(result_bundle: str | Path) -> dict[str, Any]:
     files = manifest.get("files") or {}
     if not isinstance(files, dict):
         raise EvaluationFailure("result bundle manifest 'files' is not an object")
+    # Every file the manifest must account for is required; a bundle that omits
+    # a file (e.g. metrics.json) from the manifest is rejected.
+    if set(files) != set(REQUIRED_RESULT_FILES):
+        raise EvaluationFailure(
+            "result bundle is incomplete: manifest files do not cover the full "
+            "Result Bundle file set"
+        )
     for name, expected in files.items():
         _check_result_file_name(name)
-        if not isinstance(expected, str) or not expected.startswith("sha256:"):
-            continue
+        if not _valid_file_hash(expected):
+            raise EvaluationFailure(
+                f"result bundle file {name} has a malformed hash {expected!r}"
+            )
         path = root / name
         _check_result_file(path, root)
         if not path.is_file():
@@ -385,9 +428,6 @@ def load_result_bundle(result_bundle: str | Path) -> dict[str, Any]:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest != expected[len("sha256:"):]:
             raise EvaluationFailure(f"result bundle file {name} hash mismatch (modified)")
-    _check_result_file(manifest_path, root)
-    if manifest_path.is_symlink() or manifest_path.stat().st_size > MAX_RESULT_FILE_BYTES:
-        raise EvaluationFailure("result bundle manifest unsafe or too large")
     return manifest
 
 
