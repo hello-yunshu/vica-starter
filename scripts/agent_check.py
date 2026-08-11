@@ -11,13 +11,14 @@ Usage:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from _dev_config import VERIFIER_SECRET
 
 from vica.challenges.synth_v01.family import eval_program, generate_with_solution, parse_program
-
-sys.path.insert(0, __import__("pathlib").Path(__file__).resolve().parent.parent.as_posix() + "/src")
-
-# Verifier secret for local dev tooling only; never exposed to a solver.
-VERIFIER_SECRET = "dev-script-verifier-secret"
 
 
 def main() -> None:

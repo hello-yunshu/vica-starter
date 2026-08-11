@@ -68,26 +68,47 @@ challenge 上随机基线的观测最低分。
 - **dp 极快**：d5 平均 10.6ms；brute 在 d3 需 1.1s，d4/d5 不可行。dp 作为精确解基线
   优雅地扩展了可精确求解的规模上限。
 
-## 5. Quality / Cost
+## 5. Regret（相对精确解的绝对差距）
 
-| d | opt-dp | opt-edd | opt-random | opt-brute |
-|---|-------:|--------:|-----------:|----------:|
-| 1 |   14.3 |  209.0  |   498.2    |   2.1     |
-| 2 |   71.1 | 3437.9  |  2588.2    |   0.7     |
-| 3 |   86.1 |15956.4  |  7185.8    |   0.04    |
-| 4 |   68.1 |118680.1 | 31445.5    | —         |
-| 5 |   28.1 |204007.0 | 52407.3    | —         |
+**研究指标修正**：早期版本使用 `QC = mean(|score|) / mean(ms)` 作为 Quality。该指标是
+**错误的**——因为 `score = -ΣT_j`，`abs(score)` 越大表示解越差，`abs(score)/time` 因此
+会**奖励更差的解**。此定义已废弃（`previous QC metric invalidated`）。本报告改为：
 
 ```text
-QC = mean(|score|) / mean(solve_ms)；数值越大单位成本产出越高
+regret = optimal_score - candidate_score    （0 = 最优，越大越差）
 ```
 
-**解读**：edd 与 random 的 QC 极高是因为求解近零成本（O(n log n) / O(n)）——但这是
-**廉价但低质**；dp 在 0.1–10ms 内拿到精确解，QC 稳健（28–86）。brute 在 d3 的 QC 仅 0.04，
-是**高质但昂贵**的极端。这印证 OPT-v0.1 的核心设计：Quality 与 Cost 是两个正交维度，
-arena 用 `Quality / Cost` 统一度量，穷举并非总是优胜。
+其中 `optimal_score` 由精确位掩码 DP（`opt-dp`）给出。以下 regret 由 §2 的有效 mean score
+重算（分数本身未被污染，仅 QC 指标无效）。
 
-## 6. 求解成本
+| d | opt-dp | opt-brute | opt-edd | opt-random |
+|---|-------:|----------:|--------:|-----------:|
+| 1 | 0.0    | 0.0       | 0.0     | 5.9        |
+| 2 | 0.0    | 0.0       | 1.6     | 33.3       |
+| 3 | 0.0    | 0.0       | 15.6    | 100.8      |
+| 4 | 0.0    | —         | 69.3    | 255.9      |
+| 5 | 0.0    | —         | 150.1   | 449.9      |
+
+```text
+regret（平均，迟到期单位）；dp 恒为 0（精确最优），edd/random 随难度单调增大
+```
+
+**解读**：dp 的 regret 恒为 0（精确解）；edd 的 regret 随难度单调上升（0 → 1.6 → 15.6 →
+69.3 → 150.1），刻画 deadline 收紧后贪心与最优的差距；random 的 regret 在 d2 起即远超
+edd，说明随机排列在 deadline 收紧后几乎必然远离最优——**难度区分度显著**。
+
+## 6. Quality 与 Cost 是两个正交维度
+
+本报告不在 Quality 与 Cost 之间强行压缩成一个单值（`abs(score)/time` 之类的公式会掩盖
+trade-off 并可能误导）。按设计（`opt-v0.1-design.md`、SPEC "Cost semantics"）分别呈现：
+
+- **Quality**：§3 实验相对归一化 + §5 regret（绝对差距）。
+- **Cost**：§6 求解耗时；`estimated_cost_usd` 未配置时为 UNKNOWN（N/A），不当作 0。
+
+`Cost`（edd/random 求解近零成本）与 `Quality`（dp 精确、edd 递减、random 趋零）是独立的
+两个维度；arena 保留多维 trade-off，不预设"谁更优"的唯一排序。
+
+## 7. 求解成本
 
 ```text
 dp:   d1 0.0ms → d5 10.6ms（精确）
@@ -97,7 +118,7 @@ edd/random: 均为 ~0ms
 
 `Solve Cost >> Verify Cost` 成立：验证为 O(n) 累计，全部在微秒级。
 
-## 7. DoD 对照（design doc §10）
+## 8. DoD 对照（design doc §10）
 
 | 验收项 | 状态 |
 |--------|------|
@@ -108,10 +129,10 @@ edd/random: 均为 ~0ms
 | ≥1000 实例实验 + 报告 | ✅ 1000 实例（3600 runs） |
 | pytest 全绿 | ✅ |
 
-## 8. 结论与下一步
+## 9. 结论与下一步
 
 - **OPT-v0.1 达到 Phase 4 DoD**：1000 实例、4 系统、连续 score 的难度区分度显著，
-  Quality / Cost 度量成立。
+  完成 Quality 与 Cost 多维度度量。
 - **关键结果**：
   1. dp 以毫秒级成本给出精确解，明显优于 edd 贪心（d5 质量 60.7% vs 100%）与 random（≈0）。
   2. 传统启发式 edd 在 deadline 收紧时质量单调退化，构成"有挑战但可逼近"的难度梯度。

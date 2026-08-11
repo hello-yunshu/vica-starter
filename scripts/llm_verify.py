@@ -5,6 +5,11 @@ human/LLM solver from the public tests only), checks each against the hidden
 tests, and runs the brute/random baselines on the identical instances to build
 the Phase-3 comparison.
 
+ALL verification goes through the authoritative arena verifier
+(``verify_submission`` with the verifier secret): llm, brute, and random
+solutions are all judged by the same hidden-test path that the benchmark uses.
+Nothing here is a public-only check.
+
 Answer file format:
     {"llm:42:3:0": "x % y", ...}
 
@@ -18,42 +23,20 @@ import json
 import sys
 from pathlib import Path
 
-from vica.challenges.synth_v01.family import (
-    FAMILY,
-    eval_program,
-    generate_with_solution,
-    parse_program,
-    public_tests_ok,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from _dev_config import VERIFIER_SECRET
+
+from vica.challenges.registry import build_challenge
+from vica.challenges.synth_v01.family import public_tests_ok
+from vica.protocol.models import CandidateSubmission
 from vica.systems.synth.brute_force import BruteForceSynthSystem
 from vica.systems.synth.random_program import RandomProgramSystem
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from vica.verifier.verifier import verify_submission
 
 SEED = 42
 D3_D5_INSTANCES = 10
-
-
-def instance_ids() -> list[tuple[int, int]]:
-    out: list[tuple[int, int]] = []
-    for d in (3, 4, 5):
-        out += [(d, i) for i in range(D3_D5_INSTANCES)]
-    return out
-
-
-def _hidden_ok(challenge_id: str, difficulty: int, expr: str) -> bool:
-    _, sol = generate_with_solution(challenge_id, difficulty)
-    try:
-        node = parse_program(expr)
-    except Exception:
-        return False
-    for t in sol["hidden_tests"]:
-        try:
-            if eval_program(node, dict(t["input"])) != t["expected"]:
-                return False
-        except Exception:
-            return False
-    return True
 
 
 def instance_ids_from(answers: dict) -> list[tuple[int, int]]:
@@ -63,6 +46,20 @@ def instance_ids_from(answers: dict) -> list[tuple[int, int]]:
         if len(parts) == 4 and parts[0] == "llm":
             ids.add((int(parts[2]), int(parts[3])))
     return sorted(ids)
+
+
+def _authoritative_ok(challenge_id: str, difficulty: int, expr: str) -> bool:
+    """True if *expr* passes the authoritative verifier (public + hidden)."""
+    challenge = build_challenge(
+        "synth-v0.1", challenge_id, difficulty, verifier_secret=VERIFIER_SECRET
+    )
+    submission = CandidateSubmission(
+        challenge_id=challenge.id,
+        system_id="llm-verify",
+        candidate={"program": expr},
+        metadata={},
+    )
+    return verify_submission(challenge, submission, verifier_secret=VERIFIER_SECRET).valid
 
 
 def main() -> None:
@@ -75,21 +72,46 @@ def main() -> None:
     rows: list[dict] = []
     for difficulty, i in instance_ids_from(answers):
         cid = f"llm:{SEED}:{difficulty}:{i}"
-        payload, sol = generate_with_solution(cid, difficulty)
-        challenge = {"payload": payload, "seed": cid, "difficulty": difficulty}
+        challenge = build_challenge(
+            "synth-v0.1", cid, difficulty, verifier_secret=VERIFIER_SECRET
+        )
+        challenge_dict = challenge.model_dump()
 
         expr = answers.get(cid)
-        llm_hidden = False
         llm_public = False
+        llm_hidden = False
         if expr is not None and expr.strip():
-            llm_public = public_tests_ok(payload, expr)
-            llm_hidden = _hidden_ok(cid, difficulty, expr)
+            # Solver-visible self-check: public tests only (what the solver can
+            # see). The headline column (llm_hidden) is the authoritative
+            # verifier, which also runs the hidden tests.
+            llm_public = public_tests_ok(challenge_dict["payload"], expr)
+            llm_hidden = _authoritative_ok(cid, difficulty, expr)
 
-        b_out = brute.solve({"payload": payload})
-        b_ok = bool(b_out.candidate and FAMILY.verify(challenge, b_out.candidate))
+        b_out = brute.solve(challenge_dict)
+        b_ok = False
+        if b_out.candidate is not None:
+            b_sub = CandidateSubmission(
+                challenge_id=challenge.id,
+                system_id="brute",
+                candidate=b_out.candidate,
+                metadata={},
+            )
+            b_ok = verify_submission(
+                challenge, b_sub, verifier_secret=VERIFIER_SECRET
+            ).valid
 
-        r_out = rnd.solve({"payload": payload})
-        r_ok = bool(r_out.candidate and FAMILY.verify(challenge, r_out.candidate))
+        r_out = rnd.solve(challenge_dict)
+        r_ok = False
+        if r_out.candidate is not None:
+            r_sub = CandidateSubmission(
+                challenge_id=challenge.id,
+                system_id="random",
+                candidate=r_out.candidate,
+                metadata={},
+            )
+            r_ok = verify_submission(
+                challenge, r_sub, verifier_secret=VERIFIER_SECRET
+            ).valid
 
         rows.append(
             {
@@ -119,13 +141,16 @@ def main() -> None:
     def rate(key: str) -> float:
         return sum(1 for r in rows if r[key]) / total
 
-    print("\n--- aggregate (hidden verification) ---")
+    print("\n--- aggregate (authoritative hidden verification) ---")
     print(f"llm-one-shot hidden success: {rate('llm_hidden')*100:.1f}%")
     print(f"brute hidden success:        {rate('brute_hidden')*100:.1f}%")
     print(f"random hidden success:       {rate('random_hidden')*100:.1f}%")
     by_d = {}
     for d in (3, 4, 5):
         sub = [r for r in rows if r["d"] == d]
+        if not sub:
+            by_d[d] = {"llm": None, "brute": None, "random": None, "n": 0}
+            continue
         by_d[d] = {
             "llm": sum(1 for r in sub if r["llm_hidden"]) / len(sub),
             "brute": sum(1 for r in sub if r["brute_hidden"]) / len(sub),
@@ -135,6 +160,9 @@ def main() -> None:
     print("\n--- by difficulty ---")
     for d in (3, 4, 5):
         m = by_d[d]
+        if m["n"] == 0:
+            print(f"d{d}: no instances in answer file")
+            continue
         print(
             f"d{d}: llm={m['llm']*100:.0f}% brute={m['brute']*100:.0f}% "
             f"random={m['random']*100:.0f}% (n={m['n']})"

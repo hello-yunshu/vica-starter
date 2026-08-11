@@ -20,15 +20,16 @@ import json
 import sys
 from pathlib import Path
 
-from vica.challenges.synth_v01.family import generate_with_solution
-
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from _dev_config import VERIFIER_SECRET
+
+from vica.challenges.synth_v01.family import generate_with_solution
 
 SEED = 42
 D3_D5_INSTANCES = 10
 D1D2_INSTANCES = 5
-# Verifier secret for local dev tooling only; never exposed to a solver.
-VERIFIER_SECRET = "dev-script-verifier-secret"
 
 
 def main() -> None:

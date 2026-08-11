@@ -236,6 +236,34 @@ class SolveOutput:
 
 使用相同接口。
 
+### 7.1 Solver timeout 语义
+
+`solve()` 因资源受限（墙钟超时、子进程超时、CPU 预算耗尽）未产出 candidate 时，
+必须返回 `candidate=None` 并在 `metadata["status"]` 标记 `timeout`；
+**不得**把超时当作"模型答错"（`INVALID_SOLUTION` / 计入 success rate 的失败）。
+
+Runner 将 `status == "timeout"` 的 no-candidate 结果记录为 `ErrorCode.TIMEOUT`。
+
+### 7.2 LLM transport error 语义
+
+`llm-*` 系统的 transport 结果稳定映射为以下之一（`metadata["status"]`）：
+
+| status            | 含义                                                    |
+|-------------------|---------------------------------------------------------|
+| `success`         | HTTP 200 且 body 解析出 candidate                       |
+| `timeout`         | 显式超时（客户端 socket 超时或 HTTP 408/429/504）       |
+| `transport_error` | 网络层失败（DNS、连接拒绝等）                            |
+| `provider_error`  | HTTP 错误状态（非超时族）                                |
+| `parse_error`     | HTTP 200 但 body 无法解析出 candidate                    |
+| `no_candidate`    | 上述路径均未产出 candidate                              |
+
+- `status` 始终存在；`metadata["last_error"]` 仅在有可诊断错误时存在（否则为 `None`）。
+- `timeout` 不作为模型错误：Runner 记 `ErrorCode.TIMEOUT`（同 7.1）。
+- `transport_error` / `provider_error` 且无 candidate：Runner 记 `ErrorCode.INTERNAL_ERROR`，
+  **不**计入模型的 success-rate 失败。
+- `parse_error` / `no_candidate`：Runner 记 `ErrorCode.INVALID_SOLUTION`（模型未给出可验证解）。
+- 重试由 solver 明确定义并计数（`metadata["attempts"]`），Runner 不做隐式重试（见 §8）。
+
 ---
 
 ## 8. Benchmark Runner
@@ -512,7 +540,9 @@ OS 级沙箱（`src/vica/sandbox/`，Milestone M9）是**实验性 OS 资源隔�
 - 子进程最小 allowlist 环境（不继承宿主 secrets）、进程组超时清理、CPU/输出/fd 上限：可用。
 - 内存上限（RLIMIT_AS/DATA）仅 Linux 生效（macOS fork 子进程继承约 400GiB 虚拟足迹）。
 - 网络命名空间 / read-only chroot：仅 Linux + root，默认关闭。
-- 输出上限是"达到后截断 + 标记溢出"，不是硬性流式读取即停。
+- 输出上限是**有界流式读取**（`select`）+ 输出字节预算：一旦合计输出超过
+  `max_output_bytes` 立即杀死进程组（SIGKILL）并标记 overflow——是真实的输出资源上限，
+  不是事后截断。
 
 因此 TASKS 中 M9 的 network/filesystem/memory/output/syscall 项保持
 `[ ]` 或 `[~] experimental`，不标 `[x]`。
@@ -545,9 +575,15 @@ hidden test seed / hidden test vectors / reference target program / verifier sec
 
 隔离机制：hidden tests 由
 `HMAC-SHA256(verifier_secret, f"{type}:{version}:hidden:{seed}:{difficulty}")`
-派生。Runner 每次 experiment 生成一个 verifier_secret，仅写入本地 `experiments`
-manifest；**绝不写入 Challenge、绝不传给任何 Solver、不写入 solver-visible payload**。
-Solver 只拿到 public challenge，无法从公开 (seed, difficulty) 重建 hidden material。
+派生，reference target 由
+`HMAC-SHA256(verifier_secret, f"{type}:{version}:target:{seed}:{difficulty}")`
+派生（target 与 hidden 使用不同 tag，domain-separated）。Runner 每次 experiment 解析
+一个 verifier_secret（来自 `VICA_VERIFIER_SECRET`，或新生成写入 verifier-private 路径
+`<db所在目录>/private/<experiment>.material.json`，权限 0600；默认库 `.vica/vica.db`
+对应 `.vica/private/`）。**数据库实验中只保存材料的公开
+引用（`verifier_material_id` + `verifier_material_version`），绝不保存 secret 本身、绝不写入
+Challenge、绝不传给任何 Solver、不写入 solver-visible payload**。Solver 只拿到 public
+challenge，无法从公开 (seed, difficulty) 重建 target 或 hidden material。
 
 边界测试（`tests/test_synth_generator.py`）：
 

@@ -20,6 +20,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from _dev_config import VERIFIER_SECRET
+
 from vica.challenges.synth_v01.family import (
     eval_program,
     generate_with_solution,
@@ -28,14 +33,10 @@ from vica.challenges.synth_v01.family import (
 )
 from vica.systems.synth.brute_force import BruteForceSynthSystem
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 SEED = 42
 D3_D5_INSTANCES = 10
 _BI = ("+", "-", "*", "%", "//", "min", "max")
 _UN = ("neg", "abs")
-# Verifier secret for local dev tooling only; never exposed to a solver.
-VERIFIER_SECRET = "dev-script-verifier-secret"
 
 
 def instance_ids(n: int) -> list[tuple[int, int]]:
