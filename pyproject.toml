@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vica"
-version = "0.3.0"
+version = "0.4.0"
 description = "Verifiable Intelligence Compute Arena"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -42,10 +42,14 @@ packages = ["src/vica"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+norecursedirs = ["tests/fixtures"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Golden bundle fixtures embed template source (intentionally, for historical
+# compatibility): they are load-checked by tests, not linted as live code.
+extend-exclude = ["tests/fixtures/protocol/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

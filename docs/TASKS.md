@@ -625,3 +625,60 @@ exec(candidate)
       README.zh-CN / CHANGELOG）
 
 未完成项不得提前勾选。
+
+---
+
+# v0.4.0 — Benchmark Validation & Reproducibility
+
+> v0.3.0 = Agent Benchmark（REPO-v0.1）
+> v0.4.0 = Benchmark Validation & Reproducibility（Task Pack / Execution Profile /
+> Study / compatibility / validation）
+
+## Milestone V1 — Task Pack
+
+- [x] `TaskPack` 对象：`task_pack_id` / `task_pack_version` / `task_pack_hash`
+- [x] canonical task-set definition（按 challenge id 排序，含 REPO workspace hash）
+- [x] hash 与源迭代顺序无关；`task_pack_id` 映射（`repo-v0.1-core`）
+- [x] Result Bundle 记录 task_pack_id / version / hash；strict reverify 绑定 hash
+
+## Milestone V2 — Execution Profile + Provenance
+
+- [x] `execution_profile()`（runner backend / OS / arch / Python / 依赖环境 hash /
+      VICA 版本 / git commit / timeout / 预算 / 网络策略 / passed env **names** /
+      agent command）
+- [x] `dependency_environment_hash()`（安装的 provenance 相关包版本 hash）
+- [x] Result Bundle 写入 Execution Profile；Agent runner 在 submission 携带 profile
+- [x] secret value 永不记录（仅记录 env 名称，regression 测试）
+
+## Milestone V3 — Study Orchestration
+
+- [x] `StudySystem`（agent / noop / reference / submission）+ `run_study`
+- [x] 简单嵌套循环（system × task × replicate），非 DAG / 无 job queue
+- [x] replicate 属于 run identity，不进入 Challenge / Task Pack identity
+- [x] 聚合：success rate + Wilson CI、median latency、failure taxonomy、
+      per-difficulty 分层 metric（读 Result Bundle metrics.json）
+- [x] CLI `vica study run`
+
+## Milestone V4 — Compatibility + Validation
+
+- [x] v1（CSP/SYNTH/OPT）与 v2（REPO）bundle 均经 dispatcher 加载（compat 测试）
+- [x] golden compatibility fixtures（`tests/fixtures/protocol/`：golden-v1-csp、
+      golden-v2-repo），1.0 仍能加载历史 artifact 并 reverify（§61）
+- [x] benchmark validation：reference positive control、NoOp negative control、
+      public-only overfit probe（§77）、seed generalization（§78）
+- [x] 新增 `tests/test_v04_reproducibility.py`：Task Pack / Execution Profile /
+      Study / Result binding / reverify binding / v1-v2 compat / golden fixtures
+- [x] `docs/REPRODUCIBILITY.md`（Execution Profile / local backend / Agent 隔离模型 /
+      what is / is not reproducible）
+- [x] `docs/reports/repo-v0.1-validation.md`（真实数据：reference 12/12、NoOp 0/12、
+      reverify 12/12）
+- [x] threat-model 补充 Execution provenance（v0.4）
+
+## 测试与门禁
+
+- [x] 回归门禁 PASS：`ruff check .` / `mypy src` / `pytest -q`（0.1/0.2/0.3 测试未删除）
+- [x] REPO E2E + Study E2E + reverify E2E + CSP/SYNTH/OPT regression
+- [x] 版本更新 0.4.0（pyproject / __init__ / SPEC / ROADMAP / TASKS / README /
+      README.zh-CN / CHANGELOG）
+
+未完成项不得提前勾选。

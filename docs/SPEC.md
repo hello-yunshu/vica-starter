@@ -1,6 +1,6 @@
-# VICA Protocol & Technical Specification v0.1 → v0.3
+# VICA Protocol & Technical Specification v0.1 → v0.4
 
-Status: v0.1 Frozen Core / v0.2.0 Release (Benchmark Research & External Evaluation) / v0.3.0 Release (Agent Benchmark)
+Status: v0.1 Frozen Core / v0.2.0 Release (Benchmark Research & External Evaluation) / v0.3.0 Release (Agent Benchmark) / v0.4.0 Release (Benchmark Validation & Reproducibility)
 Scope: Local Arena + CSP-v0.1 / SYNTH-v0.1 / OPT-v0.1 / REPO-v0.1 + External Evaluation
 
 ---
@@ -577,6 +577,29 @@ secret-bound family 复现      强：相同 (type, version, seed, difficulty, v
 ```
 
 即使 `temperature=0`，商业 LLM API 也不保证长期 bit-identical，文档/报告必须如实说明。
+
+### Task Pack（v0.4）
+
+基准实例集（benchmark instance set）的稳定、版本化身份：`task_pack_id`（如
+`repo-v0.1-core`）、`task_pack_version`（任务语义变化时递增，不改已发布 task）、
+`task_pack_hash`（任务集定义的 canonical SHA-256）。Result Bundle 记录三者，
+strict reverify 绑定 hash，篡改结果集即使 valid/score 巧合也会被拒绝。见
+`src/vica/eval/taskpack.py`。
+
+### Execution Profile（v0.4）
+
+Result Bundle 记录运行环境的 Execution Profile：runner backend、OS/架构、
+Python 版本、依赖环境 hash、VICA 版本与 git commit、超时/预算、网络策略，
+以及传递的 env 变量**名称**（绝不记录 value）。verifier secret 从不传给 agent，
+也从不写入任何 bundle。见 `src/vica/eval/environment.py` 与
+`docs/REPRODUCIBILITY.md`。
+
+### Study（v0.4）
+
+多 system × 多 task × 多 replicate 的简单嵌套循环（非 DAG / 无 job queue），
+自动聚合 success rate + Wilson CI、延迟、失败分类、按难度分层指标。replicate 属于
+run identity，不进入 Challenge / Task Pack identity。CLI：`vica study run`。见
+`src/vica/eval/study.py`。
 
 ---
 

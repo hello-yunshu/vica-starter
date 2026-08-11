@@ -35,7 +35,7 @@ from vica.eval.bundle import (
     validate_verifier_material,
 )
 from vica.eval.dispatch import check_result_version, is_v2
-from vica.eval.environment import environment_manifest, git_commit
+from vica.eval.environment import environment_manifest, execution_profile, git_commit
 from vica.eval.metrics import summarize
 from vica.eval.models import (
     RESULT_BUNDLE_VERSION,
@@ -47,6 +47,7 @@ from vica.eval.models import (
 )
 from vica.eval.report import render_report
 from vica.eval.submission import load_submission_bundle
+from vica.eval.taskpack import derive_task_pack
 from vica.protocol.models import CandidateSubmission, Challenge
 from vica.protocol.serialization import canonical_json_bytes, stable_hash
 from vica.repo.family import repo_result_metadata
@@ -167,6 +168,7 @@ def verify_evaluation(
         results=results,
         out=out,
         system_id=system_id,
+        task_pack=derive_task_pack(public_manifest, challenges),
     )
 
 
@@ -308,6 +310,7 @@ def _write_result_bundle(
     results: list[ResultRecord],
     out: str | Path,
     system_id: str,
+    task_pack: Any,
 ) -> dict[str, Any]:
     out_path = Path(out)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -322,10 +325,19 @@ def _write_result_bundle(
         if r.status != ReportStatus.NO_SUBMISSION
     ]
 
+    # The Execution Profile is carried by the submission's system_metadata when
+    # produced by a VICA-owned run (Agent / Command Solver); otherwise we record
+    # a local default profile so environment provenance is always present.
+    system_metadata = sub_manifest.get("system_metadata") or {}
+    profile = system_metadata.get("execution_profile")
+    if not isinstance(profile, dict):
+        profile = execution_profile()
+    environment = environment_manifest(extra={"profile": profile})
+
     files: dict[str, bytes] = {
         "evaluation.json": canonical_json_bytes(public_manifest),
         "system.json": canonical_json_bytes(sub_manifest),
-        "environment.json": canonical_json_bytes(environment_manifest()),
+        "environment.json": canonical_json_bytes(environment),
         "challenges.jsonl": _jsonl_bytes(challenges),
         "submissions.jsonl": _jsonl_bytes(submission_rows),
         "results.jsonl": _jsonl_bytes([r.__dict__ for r in results]),
@@ -355,6 +367,11 @@ def _write_result_bundle(
         "challenge_type": public_manifest.get("challenge_type"),
         "generator_version": public_manifest.get("generator_version"),
         "verifier_material_commitment": public_manifest.get("verifier_material_commitment"),
+        # v0.4 Task Pack binding (§59): which benchmark instance set this result
+        # covers, by stable identity + hash.
+        "task_pack_id": task_pack.task_pack_id,
+        "task_pack_version": task_pack.task_pack_version,
+        "task_pack_hash": task_pack.task_pack_hash,
         "vica_version": __version__,
         "git_commit": git_commit(),
         "system_id": system_id,
