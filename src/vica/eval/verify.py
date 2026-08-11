@@ -31,6 +31,8 @@ from vica.eval.bundle import (
     load_public_challenges,
     load_public_manifest,
     load_verifier_material,
+    validate_generator_version,
+    validate_verifier_material,
 )
 from vica.eval.environment import environment_manifest, git_commit
 from vica.eval.metrics import summarize
@@ -47,6 +49,20 @@ from vica.protocol.models import CandidateSubmission, Challenge
 from vica.protocol.serialization import canonical_json_bytes, stable_hash
 from vica.verifier.verifier import verify_submission
 
+# Fixed set of file names a Result Bundle v1 may contain (docs/BENCHMARK_METHODOLOGY.md).
+RESULT_FILE_ALLOWLIST = (
+    "manifest.json",
+    "evaluation.json",
+    "system.json",
+    "environment.json",
+    "challenges.jsonl",
+    "submissions.jsonl",
+    "results.jsonl",
+    "metrics.json",
+    "report.md",
+)
+MAX_RESULT_FILE_BYTES = 64 << 20
+
 
 def verify_evaluation(
     *,
@@ -62,7 +78,15 @@ def verify_evaluation(
     material = load_verifier_material(evaluation)
     challenges = load_public_challenges(evaluation)
 
-    _validate_bundle_pair(public_manifest, private_manifest, material)
+    # Fail fast on wrong/missing verifier material BEFORE any candidate is
+    # judged — a wrong secret is an evaluator error, never N x INTERNAL_ERROR.
+    validate_verifier_material(public_manifest, private_manifest, material)
+
+    # Exact-version-only generator compatibility (reproducibility).
+    challenge_type = public_manifest.get("challenge_type")
+    generator_version = public_manifest.get("generator_version")
+    validate_generator_version(public_manifest, str(challenge_type), generator_version)
+    _check_challenge_rows(challenges, challenge_type, generator_version)
 
     sub_manifest, rows = load_submission_bundle(submission, evaluation)
     if system_id is None:
@@ -111,6 +135,48 @@ def verify_evaluation(
     )
 
 
+def _check_challenge_rows(
+    challenges: list[dict[str, Any]], challenge_type: Any, generator_version: Any
+) -> None:
+    """Every challenge row must agree with the evaluation manifest."""
+    for ch in challenges:
+        if ch.get("type") != challenge_type:
+            raise EvaluationFailure(
+                f"challenge {ch.get('id')} type {ch.get('type')!r} != manifest "
+                f"{challenge_type!r}"
+            )
+        if ch.get("generator_version") != generator_version:
+            raise EvaluationFailure(
+                f"challenge {ch.get('id')} generator_version {ch.get('generator_version')!r} "
+                f"!= manifest {generator_version!r}"
+            )
+
+
+# Map a command-solver ``_vica_runner.solver_status`` to a report status.
+# These are solver outcomes (no candidate was produced), never NO_SUBMISSION and
+# never a call to the challenge verifier.
+_SOLVER_STATUS_MAP: dict[str, ReportStatus] = {
+    "timeout": ReportStatus.TIMEOUT,
+    "parse_error": ReportStatus.PARSE_ERROR,
+    "wrong_challenge_id": ReportStatus.PARSE_ERROR,
+    "no_candidate": ReportStatus.NO_CANDIDATE,
+    "nonzero_exit": ReportStatus.NO_CANDIDATE,
+    "output_too_large": ReportStatus.SANDBOX_ERROR,
+    "sandbox_error": ReportStatus.SANDBOX_ERROR,
+    "spawn_error": ReportStatus.SANDBOX_ERROR,
+}
+
+
+def _runner_telemetry(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Read VICA-owned runner telemetry under the reserved ``_vica_runner`` key.
+
+    Only this key is trusted for latency; a solver-supplied ``metadata.wall_time_ms``
+    is not trusted telemetry.
+    """
+    runner = metadata.get("_vica_runner")
+    return runner if isinstance(runner, dict) else {}
+
+
 def _verify_one(
     ch: dict[str, Any],
     candidate: Any,
@@ -118,6 +184,29 @@ def _verify_one(
     system_id: str,
     verifier_secret: str | None,
 ) -> ResultRecord:
+    runner = _runner_telemetry(metadata)
+    solve_wall_time_ms = _as_float(runner.get("wall_time_ms"))
+    solver_status = runner.get("solver_status")
+
+    # A command-solver failure has no candidate; record its outcome directly
+    # without invoking the challenge verifier.
+    if candidate is None and solver_status is not None:
+        status = _SOLVER_STATUS_MAP.get(str(solver_status), ReportStatus.NO_CANDIDATE)
+        return to_result_record(
+            challenge_id=str(ch.get("id", "")),
+            challenge_type=ch.get("type", ""),
+            generator_version=str(ch.get("generator_version", "")),
+            difficulty=int(ch.get("difficulty", 0)),
+            seed=str(ch.get("seed", "")),
+            system_id=system_id,
+            valid=False,
+            score=0.0,
+            error_code=None,
+            solve_wall_time_ms=solve_wall_time_ms,
+            status=status,
+            metadata=dict(metadata),
+        )
+
     challenge = Challenge.model_validate(ch)
     submission = CandidateSubmission(
         challenge_id=challenge.id,
@@ -142,10 +231,18 @@ def _verify_one(
         valid=result.valid,
         score=result.score,
         error_code=result.error_code,
+        solve_wall_time_ms=solve_wall_time_ms,
         verify_time_us=result.verify_time_us,
         candidate=candidate,
         metadata=meta,
     )
+
+
+def _as_float(v: Any) -> float:
+    try:
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _opt_optimal_score(ch: dict[str, Any]) -> float | None:
@@ -162,45 +259,6 @@ def _opt_optimal_score(ch: dict[str, Any]) -> float | None:
         return float(score_order(processing, deadlines, optimal_order(processing, deadlines)))
     except Exception:  # pragma: no cover - defensive
         return None
-
-
-def _validate_bundle_pair(
-    public_manifest: dict[str, Any],
-    private_manifest: dict[str, Any],
-    material: dict[str, Any],
-) -> None:
-    """Cross-check public/private consistency before any verification.
-
-    A wrong private bundle (e.g. evaluation A public paired with evaluation B
-    private) is an evaluator configuration failure and must abort before any
-    solver is judged.
-    """
-    if private_manifest.get("public_manifest_hash") != public_manifest.get("manifest_hash"):
-        raise EvaluationFailure(
-            "private bundle does not reference this public manifest (wrong private material)"
-        )
-    if private_manifest.get("challenges_hash") != public_manifest.get("challenges_hash"):
-        raise EvaluationFailure("private/public challenges_hash mismatch")
-    pub_commitment = public_manifest.get("verifier_material_commitment")
-    priv_commitment = private_manifest.get("verifier_material_commitment")
-    if _norm(pub_commitment) != _norm(priv_commitment):
-        raise EvaluationFailure(
-            "verifier material commitment mismatch between public and private bundle "
-            "(wrong or missing verifier material)"
-        )
-    mat_commitment = material.get("verifier_material_commitment")
-    if pub_commitment is not None and _norm(mat_commitment) != _norm(pub_commitment):
-        raise EvaluationFailure(
-            "verifier-material.json does not commit to the evaluation's material"
-        )
-    if pub_commitment is not None and not material.get("verifier_secret"):
-        raise EvaluationFailure(
-            "secret-bound evaluation has no verifier secret in the private material"
-        )
-
-
-def _norm(v: Any) -> str | None:
-    return str(v) if v is not None else None
 
 
 # ------------------------------------------------------------------ result bundle
@@ -253,6 +311,7 @@ def _write_result_bundle(
         "evaluation_manifest_hash": public_manifest.get("manifest_hash"),
         "challenge_type": public_manifest.get("challenge_type"),
         "generator_version": public_manifest.get("generator_version"),
+        "verifier_material_commitment": public_manifest.get("verifier_material_commitment"),
         "vica_version": __version__,
         "git_commit": git_commit(),
         "system_id": system_id,
@@ -287,27 +346,65 @@ def _bundle_hash(manifest: dict[str, Any]) -> str:
 
 def load_result_bundle(result_bundle: str | Path) -> dict[str, Any]:
     """Load a Result Bundle and verify its integrity (bundle hash + per-file
-    hashes). Returns the manifest."""
+    hashes). Returns the manifest.
+
+    Safety: the manifest's ``files`` keys must be a fixed allowlist of bundle
+    file names — path-traversal / absolute / nested / symlink entries are
+    rejected before any file is opened, and each file is size-bounded.
+    """
     root = Path(result_bundle).resolve()
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         raise EvaluationFailure(f"{root} is not a Result Bundle (missing manifest.json)")
+    if manifest_path.stat().st_size > MAX_RESULT_FILE_BYTES:
+        raise EvaluationFailure("result bundle manifest is too large")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise EvaluationFailure("result bundle manifest is not a JSON object")
+    if manifest.get("result_bundle_version") != RESULT_BUNDLE_VERSION:
+        raise EvaluationFailure(
+            f"unsupported result bundle version {manifest.get('result_bundle_version')!r}; "
+            f"supported: {RESULT_BUNDLE_VERSION!r}"
+        )
     if _bundle_hash(manifest) != manifest.get("bundle_hash"):
         raise EvaluationFailure("result bundle manifest hash mismatch (tampered or corrupted)")
+
     files = manifest.get("files") or {}
+    if not isinstance(files, dict):
+        raise EvaluationFailure("result bundle manifest 'files' is not an object")
     for name, expected in files.items():
+        _check_result_file_name(name)
         if not isinstance(expected, str) or not expected.startswith("sha256:"):
             continue
         path = root / name
+        _check_result_file(path, root)
         if not path.is_file():
             raise EvaluationFailure(f"result bundle missing file {name}")
+        if path.is_symlink() or path.stat().st_size > MAX_RESULT_FILE_BYTES:
+            raise EvaluationFailure(f"result bundle file {name} unsafe or too large")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest != expected[len("sha256:"):]:
             raise EvaluationFailure(f"result bundle file {name} hash mismatch (modified)")
+    _check_result_file(manifest_path, root)
+    if manifest_path.is_symlink() or manifest_path.stat().st_size > MAX_RESULT_FILE_BYTES:
+        raise EvaluationFailure("result bundle manifest unsafe or too large")
     return manifest
+
+
+def _check_result_file_name(name: Any) -> None:
+    if not isinstance(name, str) or name not in RESULT_FILE_ALLOWLIST:
+        raise EvaluationFailure(f"unsafe result bundle file name {name!r}")
+
+
+def _check_result_file(path: Path, root: Path) -> None:
+    """Reject symlinks and any path that escapes the bundle root."""
+    if path.is_symlink():
+        raise EvaluationFailure(f"result bundle file {path.name} must not be a symlink")
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root):
+        raise EvaluationFailure(f"result bundle file {path.name} escapes the bundle root")
+    if not resolved.is_file():
+        raise EvaluationFailure(f"result bundle missing file {path.name}")
 
 
 __all__ = ["load_result_bundle", "verify_evaluation"]
