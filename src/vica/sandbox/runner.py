@@ -96,23 +96,38 @@ class SandboxError(RuntimeError):
 _ENV_ALLOWLIST = ("LANG", "LC_ALL", "LC_CTYPE", "PYTHONIOENCODING", "TZ")
 
 
-def _sandbox_env(env: dict[str, str] | None) -> dict[str, str]:
-    """Build the child environment from an allowlist, not the host copy.
+def safe_child_environment(
+    env: dict[str, str] | None = None, *, include_path: bool = True
+) -> dict[str, str]:
+    """Build a child-process environment from an allowlist, never the host copy.
 
     Only the locale/encoding variables in ``_ENV_ALLOWLIST`` plus ``PATH``
-    (needed to exec the command) are inherited from the host. Any variable the
-    caller explicitly passes via ``env`` is layered on top. Host secrets are
-    never inherited by default.
+    (needed to exec a command) are inherited from the host; any variable the
+    caller explicitly passes via ``env`` is layered on top. Everything else —
+    API keys, tokens, ``VICA_VERIFIER_SECRET``, HOME, shells, etc. — is
+    intentionally withheld so a child process cannot read host secrets.
+
+    This is the single safe environment constructor shared by the sandbox and
+    the external command solver (docs/SPEC.md "Solver boundary").
     """
     base: dict[str, str] = {}
     for key in _ENV_ALLOWLIST:
         if key in os.environ:
             base[key] = os.environ[key]
-    if "PATH" in os.environ:
+    if include_path and "PATH" in os.environ:
         base["PATH"] = os.environ["PATH"]
     if env:
         base.update(env)
     return base
+
+
+def _sandbox_env(env: dict[str, str] | None) -> dict[str, str]:
+    """Build the child environment from an allowlist, not the host copy.
+
+    Thin wrapper over :func:`safe_child_environment` (kept for back-compat and
+    to keep the sandbox's own call sites explicit).
+    """
+    return safe_child_environment(env=env, include_path=True)
 
 
 # ---------------------------------------------------------------------- result
@@ -432,4 +447,10 @@ def _truncate(data: bytes, max_bytes: int) -> str:
     return clipped.decode("utf-8", errors="replace")
 
 
-__all__ = ["SandboxError", "SandboxLimits", "SandboxResult", "run_sandboxed"]
+__all__ = [
+    "SandboxError",
+    "SandboxLimits",
+    "SandboxResult",
+    "run_sandboxed",
+    "safe_child_environment",
+]

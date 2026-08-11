@@ -1,7 +1,7 @@
-# VICA Protocol & Technical Specification v0.1
+# VICA Protocol & Technical Specification v0.1 / v0.2
 
-Status: Draft  
-Scope: Local Arena + CSP-v0.1 / SYNTH-v0.1 / OPT-v0.1
+Status: v0.1 Frozen Core / v0.2 Extensions Under Development  
+Scope: Local Arena + CSP-v0.1 / SYNTH-v0.1 / OPT-v0.1 + External Evaluation
 
 ---
 
@@ -731,3 +731,157 @@ Protocol v0.1 完成必须满足：
 - [ ] 所有 run 可落库
 - [ ] 可以导出 CSV / JSON
 - [ ] pytest 全绿
+
+---
+
+## 17. v0.2 — Benchmark Research & External Evaluation
+
+> 详细 Bundle 格式见 `docs/protocol/BUNDLE.md`；统计方法见
+> `docs/BENCHMARK_METHODOLOGY.md`。本节是协议层增量。
+
+v0.2 在 frozen v0.1 core 之上新增：portable Evaluation Bundle、可插拔
+External Solver、可验证的 Result Artifact，以及粗粒度 Benchmark 统计。
+
+### 17.1 Evaluation Bundle
+
+evaluator 生成一批 Challenge，并明确分离 **public**（solver 可见）与
+**private**（verifier material）两部分：
+
+```text
+<evaluation>/
+├── public/
+│   ├── manifest.json      # solver-visible metadata + challenges_hash
+│   ├── challenges.jsonl   # solver-visible Challenge（每行一个）
+│   └── README.md
+└── private/
+    ├── manifest.json      # verifier-material 引用 + public hash 链接
+    └── verifier-material.json  # evaluator secret（0600）
+```
+
+public/private 是 **evaluator bundle organization**，不是 OS security isolation。
+Coding Agent 只能拿到 `public/`，绝不能拿到整个 evaluation 目录。
+
+### 17.2 版本概念
+
+至少区分：
+
+```text
+VICA software version          __version__（如 0.1.0）
+Protocol version               vica.protocol 语义版本
+Challenge generator version    family.generator_version（改变语义必须升版本）
+Bundle format version          BUNDLE_FORMAT_VERSION（独立于 VICA/Protocol/generator）
+Verifier material version      verifier/materials.py 的 MATERIAL_VERSION
+```
+
+### 17.3 Manifest hash / challenge hash
+
+```text
+manifest_hash  = SHA-256(canonical(manifest without "manifest_hash"))
+challenges_hash = SHA-256(canonical(challenge_list))
+```
+
+使用 `vica.protocol.serialization`；绝不能裸用 `json.dumps`。任何一行
+challenge 被改写会在 inspect / verify 时被 `challenges_hash` 检测。
+
+### 17.4 External Solver Protocol（极简，JSON Lines / JSON-in JSON-out）
+
+- **Mode A — File Exchange**（第一优先级）：solver 读 public challenges →
+  写 `submissions.jsonl`。编码 Agent / 人类 / 脚本都可参与，无需调 VICA API。
+- **Mode B — Command Solver**（第二优先级）：`vica solver run --command ...`，
+  VICA 每次把一个 challenge 作为单个 JSON 写入 stdin，solver 把 candidate 作为
+  单个 JSON 写回 stdout。
+
+solver 输出格式：
+
+```json
+{
+  "challenge_id": "...",
+  "candidate": {},
+  "metadata": {}
+}
+```
+
+`metadata` 不可信；正确性只依赖 verifier。
+
+### 17.5 Submission Bundle
+
+```text
+<submission>/
+├── manifest.json
+└── submissions.jsonl
+```
+
+导入验证语义：
+
+```text
+unknown challenge id  -> reject bundle（结构化错误）
+missing challenge     -> 记录 NO_SUBMISSION（报告层区分，不等价 INVALID_SOLUTION）
+duplicate challenge id -> reject ambiguous input（不静默取最后一个）
+malformed candidate    -> 单条失败（INVALID_SCHEMA），不丢弃整批
+```
+
+Submission Bundle 是**不可信**输入，设置 max line bytes / max submissions 上限。
+
+### 17.6 Authoritative Verification & Result Bundle
+
+`vica eval verify` 复用 `verify_submission()`（绝无第二套 verifier）：
+
+```text
+load public manifest -> load private material -> validate hashes ->
+match submission challenge_id -> reconstruct Challenge ->
+validate material commitment -> verify_submission() -> record raw result ->
+metrics -> result bundle
+```
+
+Result Bundle 是可移植第三方可重验 artifact：
+
+```text
+manifest.json / evaluation.json / system.json / environment.json /
+challenges.jsonl / submissions.jsonl / results.jsonl / metrics.json / report.md
+```
+
+Result Bundle 记录 bundder_format_version / evaluation manifest hash / VICA
+version / git commit / generator version / commitment / system / raw
+submissions / raw results / metrics / environment；**不含** verifier secret /
+hidden tests / target / API keys。manifest 携带 bundle_hash / 各文件 sha256。
+
+### 17.7 Reverify（strict）
+
+`vica reverify <result-bundle> --evaluation <eval>` **不重新调用 Solver**，
+只重放历史 candidate 走同一权威 verifier：
+
+```text
+load historical candidate -> load challenge/public -> load verifier material ->
+authoritative verify again -> recompute metrics
+```
+
+Strict 模式要求 same generator version / same material commitment / same
+challenge id / same verifier semantics，否则拒绝。`verify_time_us` 是 telemetry，
+不要求一致；valid / score / error_code 必须一致。
+
+### 17.8 错误分离
+
+```text
+Evaluation Failure（evaluator 问题，非 Solver）：
+  wrong verifier material / corrupt private bundle / manifest hash mismatch /
+  unknown generator version / wrong private material
+
+Solver Outcome（候选质量 / 执行失败）：
+  wrong candidate / timeout / parse failure / no candidate
+```
+
+报告层必须分开，不能把 evaluator error 算成 Solver failure。
+
+### 17.9 Bundle 端到端流程（v0.2 判定标准）
+
+```text
+vica eval prepare ...   -> public challenge bundle
+      ↓（交给任意 Coding Agent / LLM / 传统 Solver / 人类 / 脚本）
+submission bundle
+      ↓
+vica eval verify ...    -> result bundle
+      ↓（任何有正确 evaluator material 的研究者）
+vica reverify ...       -> 得到相同的 valid / score / error semantics
+```
+
+这才是 v0.2 是否完成的真正判定标准。

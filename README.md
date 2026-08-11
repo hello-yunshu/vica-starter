@@ -155,8 +155,11 @@ not accumulate runtime artifacts in the repo root.
 
 - [Vision](docs/VISION.md)
 - [Protocol & Technical Specification](docs/SPEC.md)
+- [Benchmark Methodology](docs/BENCHMARK_METHODOLOGY.md)
+- [Bundle Formats](docs/protocol/BUNDLE.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Implementation Tasks](docs/TASKS.md)
+- [Challenge Research Lab](docs/challenge-research/README.md)
 - Experiment reports: `docs/reports/`
 
 ---

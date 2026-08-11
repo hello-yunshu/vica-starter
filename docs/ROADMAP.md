@@ -4,12 +4,37 @@
 
 > 先验证“可验证智能任务是否成立”，再建设平台；先有实验数据，再定义指标；先攻击 Challenge，再扩大生态。
 
-## 当前研究状态（Research Integrity & Stabilization Freeze）
+## 当前研究状态（v0.1.0 Freeze / v0.2.0 Benchmark Research）
+
+### 版本定位
+
+```text
+v0.1.0 = Research Integrity / Protocol Foundation Freeze
+v0.2.0 = Benchmark Research & External Evaluation
+```
+
+v0.1.0 已冻结可信基础设施：deterministic verifier、challenge identity、
+verifier-material binding、canonical serialization、SQLite experiment storage、
+experiment-scoped system config、cost UNKNOWN 语义，以及 CSP/SYNTH/OPT 三个
+Challenge Family 与 LLM adapter。
+
+v0.2.0 转向研究 question：
+
+> VICA 是否能够让未知的外部 Solver / Coding Agent 在隔离的公开 Challenge 上求解，
+> 再由权威 Verifier 确定性验证，并产生任何第三方都能重新验证的 Benchmark
+> Result Bundle？
+
+核心闭环：Prepare → Public Bundle → External Solver → Submission Bundle →
+Authoritative Verification → Result Bundle → Independent Reverification →
+Benchmark Research Report。
+
+### 成熟度声明
 
 仓库中已有 SYNTH-v0.1 / OPT-v0.1 / OS 沙箱的**代码 prototype**，但这**不**等于
 对应 Phase 已完成。Roadmap 里的 Phase 表示**研究成熟度与正式退出条件**；代码
 prototype ≠ milestone complete。当前把它们标为 *Experimental / Under Review*，
-只有满足退出条件并经过外部复核后才算完成。
+只有满足退出条件并经过外部复核后才算完成。v0.2.0 **不**把 SYNTH / OPT / OS
+沙箱升级为 Stable。
 
 Public API / hosted arena（Phase 6）是**有意延期**（intentional deferral），
 在 challenge integrity 与 reproducibility 成熟之前不实施，这并非缺失功能。
@@ -175,6 +200,39 @@ docs/challenge-research/
 - 数据泄漏风险
 - solver dominance
 - generalization 失败案例
+
+---
+
+## v0.2.0 — Benchmark Research & External Evaluation
+
+将工程 benchmark 升级为研究 benchmark，并让未知外部 Solver 参与同一权威 Verifier。
+
+交付（M1–M6）：
+
+- M1 v0.1 Release Baseline / v0.2 Workspace
+- M2 Evaluation Bundle（public/private 分离、manifest hash、`vica eval prepare/inspect`）
+- M3 External Solver Protocol（file exchange + command solver、Submission Bundle）
+- M4 Result Bundle + deterministic Reverify（`vica eval verify` / `vica reverify`）
+- M5 Benchmark Methodology（Wilson 95% CI、cost coverage、latency、failure taxonomy、paired comparison）
+- M6 SYNTH Scientific Calibration / Challenge Research Lab
+
+原则：
+
+```text
+1. Solver output is untrusted.
+2. Correctness remains deterministic.
+3. No LLM judge.
+4. External Solver 与内置 Solver 进入同一个 verifier。
+5. Public Bundle 绝不包含 verifier secret / hidden tests / reference target。
+6. Result Bundle 可重新验证。
+7. UNKNOWN cost 保持 UNKNOWN。
+8. Historical benchmark data 不被新逻辑悄悄重解释。
+9. Challenge generator version 改变语义时升版本。
+10. Benchmark 允许“不支持原假设”的结论。
+```
+
+v0.2.0 明确**不**做：Server / FastAPI / Hosted Arena / Public API / Web UI /
+账号登录 / 在线排行榜 / Worker scheduler / P2P / Blockchain / Token / Wallet。
 
 ---
 

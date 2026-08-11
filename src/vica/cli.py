@@ -212,5 +212,202 @@ def challenges() -> None:
     typer.echo(f"systems: {', '.join(available_systems())}")
 
 
+# ------------------------------------------------------------------ v0.2 eval
+
+
+eval_app = typer.Typer(
+    help="v0.2 Benchmark Research & External Evaluation (docs/BENCHMARK_METHODOLOGY.md)",
+    no_args_is_help=True,
+)
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("prepare")
+def eval_prepare(
+    challenge: Annotated[str, typer.Option(help="challenge type")] = "synth-v0.1",
+    difficulty: Annotated[
+        str, typer.Option(help="difficulty preset(s); e.g. 1-3 or 1,3,5")
+    ] = "1-3",
+    instances: Annotated[int, typer.Option(min=1, help="instances per difficulty")] = 20,
+    seed: Annotated[int, typer.Option(help="evaluation seed")] = 42,
+    out: Annotated[Path, typer.Option(help="output directory")] = Path(
+        ".vica/evaluations/eval-001"
+    ),
+    verifier_secret: Annotated[
+        str | None,
+        typer.Option(
+            help="verifier secret (default: $VICA_VERIFIER_SECRET or generated)"
+        ),
+    ] = None,
+) -> None:
+    """Prepare a public+private Evaluation Bundle."""
+    from vica.eval.bundle import prepare_evaluation
+
+    try:
+        difficulties = _parse_difficulties(difficulty)
+    except ValueError as exc:
+        typer.echo(f"error: invalid difficulty spec {difficulty!r}: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if not difficulties:
+        typer.echo("error: no difficulties parsed", err=True)
+        raise typer.Exit(1)
+    try:
+        summary = prepare_evaluation(
+            challenge_type=challenge,
+            difficulties=difficulties,
+            instances=instances,
+            seed=seed,
+            out=out,
+            verifier_secret=verifier_secret,
+        )
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"evaluation id: {summary['evaluation_id']}")
+    typer.echo(f"challenges:    {summary['challenge_count']}")
+    typer.echo(f"public hash:   {summary['public_manifest_hash']}")
+    typer.echo(f"private hash:  {summary['private_manifest_hash']}")
+    typer.echo(f"out:           {summary['out']}")
+
+
+@eval_app.command("inspect")
+def eval_inspect(
+    bundle: Annotated[Path, typer.Argument(help="evaluation bundle directory")],
+) -> None:
+    """Validate an Evaluation Bundle (no solver is invoked)."""
+    from vica.eval.bundle import inspect_evaluation
+
+    try:
+        info = inspect_evaluation(bundle)
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"evaluation_id: {info['evaluation_id']}")
+    typer.echo(f"bundle_format:  {info['bundle_format_version']}")
+    typer.echo(f"challenge_type: {info['challenge_type']} ({info['generator_version']})")
+    typer.echo(f"difficulties:   {info['difficulties']}")
+    typer.echo(f"challenge_count:{info['challenge_count']}")
+    typer.echo(f"public hash:    {info['public_manifest_hash']}")
+    typer.echo(f"private hash:   {info['private_manifest_hash']}")
+    typer.echo(f"commitment:     {info['verifier_material_commitment']}")
+    if info["ok"]:
+        typer.echo("status: OK")
+    else:
+        typer.echo("status: FAIL", err=True)
+        for issue in info["issues"]:
+            typer.echo(f"  - {issue}", err=True)
+        raise typer.Exit(2)
+
+
+@eval_app.command("verify")
+def eval_verify(
+    evaluation: Annotated[Path, typer.Option(help="evaluation bundle directory")],
+    submission: Annotated[Path, typer.Option(help="submission bundle directory")],
+    out: Annotated[Path, typer.Option(help="result bundle output directory")],
+    system: Annotated[
+        str | None,
+        typer.Option("--system", help="system id (default: submission manifest system_id)"),
+    ] = None,
+    trust_runner_telemetry: Annotated[
+        bool,
+        typer.Option(
+            "--trust-runner-telemetry",
+            help="trust reserved _vica_* runner telemetry (only for a VICA "
+            "command-solver artifact; never for a file-exchange submission)",
+        ),
+    ] = False,
+) -> None:
+    """Authoritatively verify a submission and write a Result Bundle."""
+    from vica.eval.verify import verify_evaluation
+
+    try:
+        summary = verify_evaluation(
+            evaluation=evaluation,
+            submission=submission,
+            out=out,
+            system_id=system,
+            trusted_runner_telemetry=trust_runner_telemetry,
+        )
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"evaluation id: {summary['evaluation_id']}")
+    typer.echo(f"system id:     {summary['system_id']}")
+    typer.echo(f"challenges:    {summary['challenge_count']}")
+    typer.echo(f"valid:         {summary['valid']}")
+    typer.echo(f"no_submission: {summary['no_submission']}")
+    typer.echo(f"bundle hash:   {summary['bundle_hash']}")
+    typer.echo(f"out:           {summary['out']}")
+
+
+# ------------------------------------------------------------------ v0.2 solver
+
+
+solver_app = typer.Typer(
+    help="v0.2 External Solver (docs/protocol/BUNDLE.md)", no_args_is_help=True
+)
+app.add_typer(solver_app, name="solver")
+
+
+@solver_app.command("run")
+def solver_run(
+    command: Annotated[str, typer.Option(help="shell command to run once per challenge")],
+    bundle: Annotated[Path, typer.Option(help="evaluation bundle (public) directory")],
+    out: Annotated[Path, typer.Option(help="submission bundle output directory")],
+    system: Annotated[str, typer.Option(help="system id")] = "external",
+    timeout: Annotated[float, typer.Option(help="per-challenge timeout (seconds)")] = 120.0,
+) -> None:
+    """Run an external command once per challenge (stdin->challenge, stdout->candidate)."""
+    from vica.eval.command_solver import solve_with_command
+
+    try:
+        summary = solve_with_command(
+            evaluation=bundle,
+            command=command,
+            out=out,
+            system_id=system,
+            timeout_s=timeout,
+        )
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"evaluation id: {summary['evaluation_id']}")
+    typer.echo(f"system id:     {summary['system_id']}")
+    typer.echo(f"solved:        {summary['solved']}/{summary['expected']}")
+    typer.echo(f"failures:      {len(summary['failures'])}")
+    typer.echo(f"out:           {summary['out']}")
+
+
+# ------------------------------------------------------------------ v0.2 reverify
+
+
+@app.command()
+def reverify(
+    result_bundle: Annotated[Path, typer.Argument(help="result bundle directory")],
+    evaluation: Annotated[Path, typer.Option(help="evaluation bundle root directory")],
+    system: Annotated[
+        str | None,
+        typer.Option("--system", help="system id (default: result bundle system_id)"),
+    ] = None,
+) -> None:
+    """Strictly reverify a Result Bundle (no solver call)."""
+    from vica.eval.reverify import reverify_bundle
+
+    try:
+        summary = reverify_bundle(result_bundle, evaluation, system_id=system)
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"evaluation id: {summary['evaluation_id']}")
+    typer.echo(f"system id:     {summary['system_id']}")
+    typer.echo(f"challenges:    {summary['challenge_count']}")
+    typer.echo(f"matched:       {summary['matched']}")
+    if summary["ok"]:
+        typer.echo("reverify: OK (identical valid/score/error semantics)")
+    else:
+        typer.echo(f"reverify: {len(summary['mismatches'])} mismatch(es)", err=True)
+        raise typer.Exit(2)
+
+
 if __name__ == "__main__":
     app()
