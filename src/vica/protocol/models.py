@@ -13,7 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ErrorCode(StrEnum):
-    """Result error codes defined in SPEC v0.1 section 4."""
+    """Result error codes defined in SPEC v0.1 section 4.
+
+    v0.3 adds the REPO challenge taxonomy: patch application, structural
+    constraints, and distinct public / hidden test failures.
+    """
 
     INVALID_SCHEMA = "INVALID_SCHEMA"
     WRONG_CHALLENGE = "WRONG_CHALLENGE"
@@ -21,6 +25,13 @@ class ErrorCode(StrEnum):
     TIMEOUT = "TIMEOUT"
     SANDBOX_ERROR = "SANDBOX_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # v0.3 REPO challenge failures.
+    NO_CANDIDATE = "NO_CANDIDATE"
+    PROCESS_FAILURE = "PROCESS_FAILURE"
+    PATCH_APPLY_FAILURE = "PATCH_APPLY_FAILURE"
+    STRUCTURAL_VIOLATION = "STRUCTURAL_VIOLATION"
+    PUBLIC_TEST_FAILURE = "PUBLIC_TEST_FAILURE"
+    HIDDEN_TEST_FAILURE = "HIDDEN_TEST_FAILURE"
 
 
 class Challenge(BaseModel):
