@@ -9,6 +9,7 @@ from vica.challenges.opt_v01 import FAMILY as _OPT_FAMILY
 from vica.challenges.synth_v01 import FAMILY as _SYNTH_FAMILY
 from vica.protocol.models import Challenge
 from vica.protocol.serialization import canonical_json_bytes, stable_hash
+from vica.repo.family import FAMILY as _REPO_FAMILY
 from vica.verifier.interfaces import ChallengeFamily
 from vica.verifier.material import verifier_material_commitment
 
@@ -16,6 +17,7 @@ _REGISTRY: dict[str, ChallengeFamily] = {
     _CSP_FAMILY.type_name: _CSP_FAMILY,
     _SYNTH_FAMILY.type_name: _SYNTH_FAMILY,
     _OPT_FAMILY.type_name: _OPT_FAMILY,
+    _REPO_FAMILY.type_name: _REPO_FAMILY,
 }
 
 
