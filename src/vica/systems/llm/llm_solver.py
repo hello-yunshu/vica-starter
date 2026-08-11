@@ -93,12 +93,8 @@ class LLMSolverSystem:
         self.api_key = (
             api_key or os.environ.get("VICA_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
         )
-        self.timeout_seconds = timeout_seconds or float(
-            os.environ.get("VICA_LLM_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS)
-        )
-        self.max_retries = max_retries or int(
-            os.environ.get("VICA_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
-        )
+        self.timeout_seconds = _resolve_timeout_seconds(timeout_seconds)
+        self.max_retries = _resolve_max_retries(max_retries)
         self.input_price_per_mtok = (
             input_price_per_mtok
             if input_price_per_mtok is not None
@@ -343,6 +339,38 @@ def _env_float(name: str) -> float | None:
     return float(value)
 
 
+def _resolve_timeout_seconds(timeout_seconds: float | None) -> float:
+    """Explicit *timeout_seconds* wins over the environment default.
+
+    ``is not None`` (never truthiness): an explicit 0 would otherwise silently
+    fall back to the environment default.
+    """
+    resolved = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else float(os.environ.get("VICA_LLM_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS))
+    )
+    if resolved <= 0:
+        raise ValueError("timeout_seconds must be > 0")
+    return resolved
+
+
+def _resolve_max_retries(max_retries: int | None) -> int:
+    """Explicit *max_retries* wins over the environment default.
+
+    ``is not None`` (never truthiness): ``max_retries=0`` must mean "zero
+    retries", not "use the default".
+    """
+    resolved = (
+        max_retries
+        if max_retries is not None
+        else int(os.environ.get("VICA_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES))
+    )
+    if resolved < 0:
+        raise ValueError("max_retries must be >= 0")
+    return resolved
+
+
 def _estimate_cost_usd(
     input_tokens: int,
     output_tokens: int,
@@ -444,12 +472,8 @@ class SynthLLMOneShotSystem:
         self.api_key = (
             api_key or os.environ.get("VICA_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
         )
-        self.timeout_seconds = timeout_seconds or float(
-            os.environ.get("VICA_LLM_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS)
-        )
-        self.max_retries = max_retries or int(
-            os.environ.get("VICA_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
-        )
+        self.timeout_seconds = _resolve_timeout_seconds(timeout_seconds)
+        self.max_retries = _resolve_max_retries(max_retries)
         self.input_price_per_mtok = (
             input_price_per_mtok
             if input_price_per_mtok is not None
@@ -580,12 +604,8 @@ class SynthLLMAgentSystem:
         self.api_key = (
             api_key or os.environ.get("VICA_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
         )
-        self.timeout_seconds = timeout_seconds or float(
-            os.environ.get("VICA_LLM_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS)
-        )
-        self.max_retries = max_retries or int(
-            os.environ.get("VICA_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
-        )
+        self.timeout_seconds = _resolve_timeout_seconds(timeout_seconds)
+        self.max_retries = _resolve_max_retries(max_retries)
         self.max_rounds = max_rounds
         self.input_price_per_mtok = (
             input_price_per_mtok
