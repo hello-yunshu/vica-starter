@@ -67,7 +67,7 @@ Contains only solver-visible fields:
 {
   "bundle_format_version": "1",
   "evaluation_id": "eval-<sha256[:12]>",
-  "vica_version": "0.1.0",
+  "vica_version": "0.2.0",
   "challenge_type": "synth-v0.1",
   "generator_version": "0.2.0",
   "seed": 42,
@@ -153,6 +153,13 @@ as failed without aborting the whole run.
 ```
 
 `metadata` is untrusted self-report. Correctness comes only from the verifier.
+
+Solver-provided metadata is untrusted self-report. Only telemetry measured by a
+VICA-owned runner execution path may be used as authoritative latency /
+process-failure provenance. Reserved `_vica_*` keys are owned by VICA — a
+file-exchange Submission may not claim them, and verify strips them unless the
+submission was produced by the VICA Command Solver (which opts in to trusted
+runner telemetry).
 
 ---
 
