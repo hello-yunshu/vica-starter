@@ -43,6 +43,12 @@ VICA 是 Local Research Arena。以下组件当前已存在：
 | SQLite storage | Stable | 实验、Challenge、系统、运行记录 |
 | Export / metrics | Stable | CSV / JSON 导出、聚合指标 |
 | LLM adapter | Under Review | OpenAI 兼容 API 路径（定价可选） |
+| Evaluation Bundles | Stable | v1/v2 可移植 Evaluation / Submission / Result bundle |
+| Strict Reverify | Stable | Result Bundle 的确定性复验 |
+| REPO-v0.1 | Stable | Agent Benchmark——coding-agent workspace + patch 验证 |
+| Task Pack | Stable | 基准实例集的版本化身份（`task_pack_hash`） |
+| Execution Profile | Stable | 环境 provenance（仅记录名称，绝不记录 secret value） |
+| Study | Stable | 多 run 复现 + 分层指标（`vica study run`） |
 | SYNTH-v0.1 | Experimental | 程序合成研究（受限 DSL） |
 | OPT-v0.1 | Experimental | 连续解质量（调度） |
 | OS sandbox | Experimental | OS 资源隔离原型（见 Security） |

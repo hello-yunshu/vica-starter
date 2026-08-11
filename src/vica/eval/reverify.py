@@ -31,6 +31,7 @@ from vica.eval.bundle import (
 )
 from vica.eval.metrics import summarize
 from vica.eval.models import EvaluationFailure, ReportStatus, ResultRecord, to_result_record
+from vica.eval.taskpack import derive_task_pack
 from vica.eval.verify import MAX_RESULT_FILE_BYTES, load_result_bundle
 from vica.protocol.models import CandidateSubmission, Challenge
 from vica.protocol.serialization import stable_hash
@@ -100,6 +101,23 @@ def reverify_bundle(
             f"!= result bundle {stored_gen!r}"
         )
     validate_generator_version(pub, str(pub.get("challenge_type")), stored_gen)
+
+    # Strict mode: bind the Task Pack identity (§50 / §59). The stored result
+    # must cover exactly the same benchmark instance set as the evaluation
+    # being used; a task_pack_hash mismatch means the tasks changed or the
+    # stored result is from a different task set.
+    task_pack = derive_task_pack(pub, load_public_challenges(evaluation))
+    stored_task_hash = manifest.get("task_pack_hash")
+    stored_task_id = manifest.get("task_pack_id")
+    if (
+        stored_task_hash != task_pack.task_pack_hash
+        or stored_task_id != task_pack.task_pack_id
+    ):
+        raise EvaluationFailure(
+            "strict reverify refused: task pack mismatch between evaluation and result "
+            f"bundle (evaluation {task_pack.task_pack_id}@{task_pack.task_pack_hash[:12]} "
+            f"!= stored {stored_task_id}@{(_norm(stored_task_hash) or 'none')[:12] or 'none'})"
+        )
 
     # Strict mode: the evaluation used for reverify must carry the same
     # verifier material (including the actual secret confirming the commitment).
