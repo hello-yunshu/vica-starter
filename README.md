@@ -82,6 +82,14 @@ VICA is a local research arena. The following components exist today:
 > repo root can read `src/`. For a truly adversarial hidden benchmark, keep the
 > verifier secret / hidden tests / reference solution out of the agent's readable
 > workspace and give it only a public challenge bundle.
+>
+> What Evaluation Mode **guarantees**: the reference target and hidden tests are
+> secret-bound (HMAC-derived; the public seed alone cannot recover them), the
+> solver-visible challenge never contains verifier material, and the active
+> evaluator secret is never written into the solver-readable experiment DB.
+> What it does **not** guarantee: an agent with the verifier-private path or the
+> secret itself can still recover hidden material, so adversarial evaluation
+> MUST run the solver in a workspace that excludes the verifier-private state.
 
 ---
 

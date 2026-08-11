@@ -470,13 +470,20 @@ payload_json
 created_at
 ```
 
-### systems
+### experiment_systems
 
 ```text
-id
+experiment_id
+system_id
 type
 config_json
+
+PRIMARY KEY (experiment_id, system_id)
 ```
+
+系统配置是 **experiment-scoped 快照**：每个实验保留自己的 resolved config，
+不同实验的相同 `system_id`（如 `llm` 使用不同 model）互不覆盖，历史实验保持
+可复现。
 
 ### runs
 
@@ -492,6 +499,11 @@ verify_time_us
 metadata_json
 created_at
 ```
+
+Schema 版本通过 `PRAGMA user_version` 管理（当前 `2`）。打开任意数据库
+（新建或 legacy v0.1）都会幂等地收敛到当前 schema：全部 DDL 使用
+`CREATE TABLE IF NOT EXISTS`，`experiment_systems` 为 v2 新增；历史
+`runs` 数据在迁移中原样保留。
 
 ---
 
@@ -538,11 +550,11 @@ OS 级沙箱（`src/vica/sandbox/`，Milestone M9）是**实验性 OS 资源隔�
 **不是**已硬化、可抵御恶意代码的隔离边界：
 
 - 子进程最小 allowlist 环境（不继承宿主 secrets）、进程组超时清理、CPU/输出/fd 上限：可用。
+- 输出是 **bounded streaming**：子进程独立进程组启动，stdout/stderr 通过
+  `select` 流式读取；一旦联合输出超过 `max_output_bytes` 立即 kill 整个进程组
+  （真正的输出资源上限，不是事后截断；截断只发生在进程已死亡后的残余读取）。
 - 内存上限（RLIMIT_AS/DATA）仅 Linux 生效（macOS fork 子进程继承约 400GiB 虚拟足迹）。
 - 网络命名空间 / read-only chroot：仅 Linux + root，默认关闭。
-- 输出上限是**有界流式读取**（`select`）+ 输出字节预算：一旦合计输出超过
-  `max_output_bytes` 立即杀死进程组（SIGKILL）并标记 overflow——是真实的输出资源上限，
-  不是事后截断。
 
 因此 TASKS 中 M9 的 network/filesystem/memory/output/syscall 项保持
 `[ ]` 或 `[~] experimental`，不标 `[x]`。

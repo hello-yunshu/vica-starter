@@ -76,6 +76,13 @@ VICA 是 Local Research Arena。以下组件当前已存在：
 > Development Mode 与 Evaluation Mode：直接在仓库根目录工作的 Coding Agent 可以读取
 > `src/`。对于真正的对抗性 hidden benchmark，请把 verifier secret / hidden tests /
 > 参考解放在 Agent 可读 workspace 之外，只给它一个 public challenge bundle。
+>
+> Evaluation Mode **保证**：参考 target 与 hidden tests 由 verifier secret
+> 绑定（HMAC 派生；仅凭 public seed 无法恢复），Solver 可见的 challenge 从不包含
+> verifier material，且 active evaluator secret 从不写入 Solver 可读的实验 DB。
+> Evaluation Mode **不保证**：拿到 verifier-private 路径或 secret 本身的 Agent
+> 仍可恢复隐藏材料，因此对抗性评估必须把 Solver 放在不含 verifier-private 状态的
+> 独立 workspace 中运行。
 
 ---
 

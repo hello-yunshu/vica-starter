@@ -393,3 +393,41 @@ exec(candidate)
 - reproducibility instructions
 
 任何模型系统都不能绕过统一 verifier。
+
+---
+
+# v0.1 Stabilization Freeze（Research Integrity & Stabilization）
+
+状态如实标注；`[~]` 表示仅部分/需外部条件保证。
+
+## Evaluation Mode / 隐藏材料
+
+- [x] reference target 由 `HMAC-SHA256(verifier_secret, type:version:target:seed:difficulty)`
+      派生，仅凭 public (seed, difficulty) 无法恢复
+- [x] hidden tests 使用独立 domain tag（`hidden`），与 target RNG 域分离
+- [x] Solver-visible challenge 不含 verifier material（target / hidden / secret）
+- [x] active evaluator secret 不写入 solver-readable 实验 DB
+      （experiments.config_json 只存 verifier_material_id/version）
+- [~] 对抗性 Evaluation Mode 需要 Solver 运行在**不含 verifier-private 状态**的
+      独立 workspace / 容器中（见 `docs/SPEC.md` §14bis 与 README）——v0.1 提供
+      架构与工具（public bundle + verifier-private 路径 + 显式 secret），不做 OS 用户
+      隔离
+
+## Metrics / 成本 / 错误语义
+
+- [x] UNKNOWN cost 一律 N/A，`vica report` / leaderboard 不 crash
+- [x] LLM transport 语义稳定：success / timeout / transport_error /
+      provider_error / parse_error / no_candidate；
+      timeout → TIMEOUT；transport/provider error → INTERNAL_ERROR；
+      parse_error / no_candidate → INVALID_SOLUTION
+- [x] OPT regret（optimal - candidate）正确方向；不再使用 `abs(score)/time` 作为
+      quality
+- [x] system config 为 experiment-scoped 快照（`experiment_systems` 表，v2 schema，
+      `PRAGMA user_version` 迁移）
+
+## Provenance
+
+- [x] `scripts/llm_verify.py` 走权威 `verify_submission`（含 hidden tests），
+      所有 solver（llm / brute / random）同一判定路径
+- [x] 开发脚本统一从 `scripts/_dev_config.py` 读取 dev verifier secret
+      （`VICA_DEV_VERIFIER_SECRET` 可覆盖），明确 NON-SECRET DEV ONLY
