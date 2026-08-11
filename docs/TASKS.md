@@ -407,11 +407,14 @@ exec(candidate)
 - [x] hidden tests 使用独立 domain tag（`hidden`），与 target RNG 域分离
 - [x] Solver-visible challenge 不含 verifier material（target / hidden / secret）
 - [x] active evaluator secret 不写入 solver-readable 实验 DB
-      （experiments.config_json 只存 verifier_material_id/version）
+      （experiments.config_json 只存公开 material 引用：完整 commitment +
+      verifier_material_id/version）
 - [~] 对抗性 Evaluation Mode 需要 Solver 运行在**不含 verifier-private 状态**的
-      独立 workspace / 容器中（见 `docs/SPEC.md` §14bis 与 README）——v0.1 提供
-      架构与工具（public bundle + verifier-private 路径 + 显式 secret），不做 OS 用户
-      隔离
+      独立 workspace / 容器中（见 `docs/SPEC.md` §14bis 与 README）。v0.1 定义
+      public-bundle **边界**（solver-visible challenge 携带 commitment，绝不携带
+      secret / target / hidden），并提供 verifier-private 路径 + 显式 secret；
+      **由 evaluator 负责**把 solver-visible challenge 放入隔离 workspace。
+      v0.1 不提供独立的 public-bundle CLI 工具，也不做 OS 用户隔离
 
 ## Metrics / 成本 / 错误语义
 
@@ -431,3 +434,27 @@ exec(candidate)
       所有 solver（llm / brute / random）同一判定路径
 - [x] 开发脚本统一从 `scripts/_dev_config.py` 读取 dev verifier secret
       （`VICA_DEV_VERIFIER_SECRET` 可覆盖），明确 NON-SECRET DEV ONLY
+
+---
+
+# v0.1 Final Freeze — Protocol Identity & Release-Candidate
+
+- [x] secret-bound Challenge 携带公开 `verifier_material_commitment`
+      （完整 64 hex SHA-256，domain-separated，含 material version）
+- [x] commitment 进入 Challenge identity（相同 seed / difficulty / version +
+      不同 material => 不同 challenge_id；CSP / OPT 普通 identity 不受影响）
+- [x] verifier 在 hidden 评估前首先校验 commitment；mismatch / 缺失 secret
+      => `INTERNAL_ERROR`（日志标注 `verifier_material_mismatch`），绝不误报为
+      Solver 的 `INVALID_SOLUTION`
+- [x] SYNTH post-isolation generator 版本升级（`0.2.0`，与历史 `0.1.0` 区分；
+      历史报告保留原版本标注并说明 predate isolation）
+- [x] 真实 legacy schema（origin/main 的 `experiments` 无 `env_json`、
+      无 `experiment_systems`）迁移验证：v0→v1（补 `env_json`）→v2
+      （建 `experiment_systems`），历史行保持、迁移后新写入成功、重开幂等
+- [x] LLM `max_retries=0` 与显式 `timeout_seconds` 以 `is not None` 判定，
+      不退回环境默认值；`max_retries >= 0`、`timeout_seconds > 0` 校验
+- [x] `work/v0.1-freeze-final` 以 `origin/main` 为祖先（存在合法 merge-base）
+- [ ] 最终 PR（base: main, head: work/v0.1-freeze-final）在新 merge ref 上
+      CI 全绿（Install / Ruff / mypy / pytest）
+
+未完成项不得提前勾选。

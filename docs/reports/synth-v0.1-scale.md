@@ -22,6 +22,11 @@
 > 隐藏材料的 secret-派生隔离见 `docs/SPEC.md` "Verifier material" 与
 > `test_synth_generator.py`。
 
+> **Generator 版本**：当前 SYNTH 实现使用 `generator_version` **0.2.0**
+> （target / hidden / public examples 全部 secret-bound）。本报告及下文所有数字
+> 均来自历史 `generator_version` **0.1.0**（target 由 public seed 派生），
+> 早于 verifier-material isolation，两者不可直接比较。
+
 ---
 
 ## 1. 汇总表
@@ -105,10 +110,15 @@ mean verify time: 16–58 μs（跨难度）
 
 ## 6. 可复现性
 
-- 相同 `(type, generator_version, seed, difficulty)` 生成相同 payload 与隐藏测试。
+- 历史 0.1.0 生成语义下，相同 `(type, generator_version, seed, difficulty)`
+  生成相同 payload 与隐藏测试。
 - 实验 seed=42，全部 2000 runs 落库 `exp-9925b24b6521`，可通过
   `vica export exp-9925b24b6521` 重新导出（本报告数据文件即由此生成）。
 - 隐藏测试在验证时从 `(seed, difficulty)` 确定性重生成，从不分发。
+- **当前 0.2.0 生成语义**：payload 与隐藏测试由
+  `(type, generator_version, seed, difficulty, verifier_material_commitment)`
+  确定——相同 seed 但不同 verifier material 是不同的 benchmark instance
+  （见 `docs/SPEC.md` "Challenge identity"）。
 
 ## 7. DoD 对照
 

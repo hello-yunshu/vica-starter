@@ -40,13 +40,18 @@ v0.1 不定义：
   "generator_version": "0.1.0",
   "seed": "hex-or-uuid",
   "difficulty": 1,
+  "verifier_material_commitment": null,
   "payload": {}
 }
 ```
 
+`verifier_material_commitment`：secret-bound challenge family
+（`requires_verifier_secret = True`，当前仅 SYNTH-v0.1）携带完整的 SHA-256
+material 承诺（64 hex chars，见 §2.2bis）；普通家族（CSP / OPT）恒为 `null`。
+
 ### 2.2 生成约束
 
-Challenge 必须由下列输入确定：
+普通 challenge family 的 Challenge 必须由下列输入确定：
 
 ```text
 (type, generator_version, seed, difficulty)
@@ -54,16 +59,41 @@ Challenge 必须由下列输入确定：
 
 相同输入必须生成完全一致的 payload。
 
-### 2.3 Challenge ID
-
-建议：
+verifier-secret-bound family（`requires_verifier_secret = True`）的 Challenge
+身份额外绑定 verifier material：
 
 ```text
-challenge_id =
-BLAKE3(canonical(challenge_without_id))
+(type, generator_version, seed, difficulty, verifier_material_commitment)
 ```
 
-若 MVP 暂不引入 BLAKE3 依赖，可先使用 SHA-256。
+即：相同 public seed 但不同 verifier material 应视为**不同的 benchmark
+instance**（不同 challenge_id）。该字段在 authoritative 生成路径
+（`build_challenge(..., verifier_secret=...)`）由权威方写入，Solver 无法自行决定。
+
+### 2.2bis Verifier-material commitment
+
+```text
+verifier_material_commitment =
+SHA-256("vica:verifier-material:" + material_version + ":" + verifier_secret)
+```
+
+完整 64 hex digest 是协议承诺本身，**不得截断**用于身份绑定；
+短 ID（`material_id = commitment[:16]`）仅用于人类 / 数据库显示。
+
+### 2.3 Challenge ID
+
+```text
+challenge_id = SHA-256(canonical(identity inputs))
+```
+
+identity inputs 与 §2.2 完全一致：
+
+- 普通 family：`(type, generator_version, seed, difficulty, payload)`
+- secret-bound family：`(type, generator_version, seed, difficulty, payload,
+  verifier_material_commitment)`
+
+`payload` 参与 ID；`verifier_material_commitment = null` 的字段**不**参与普通
+family 的 canonical form，因此新增承诺字段不会改变既有 CSP / OPT Challenge ID。
 
 ---
 
@@ -500,10 +530,19 @@ metadata_json
 created_at
 ```
 
-Schema 版本通过 `PRAGMA user_version` 管理（当前 `2`）。打开任意数据库
-（新建或 legacy v0.1）都会幂等地收敛到当前 schema：全部 DDL 使用
-`CREATE TABLE IF NOT EXISTS`，`experiment_systems` 为 v2 新增；历史
-`runs` 数据在迁移中原样保留。
+Schema 版本通过 `PRAGMA user_version` 管理（当前 `2`）。迁移按版本逐步执行，
+幂等且可重复打开、不破坏历史数据：
+
+```text
+v0  初始发布（origin/main ee61542）的真实旧 schema：
+     experiments(id, created_at, config_json, git_commit, vica_version)
+     —— 没有 env_json，没有 experiment_systems
+v1  ALTER TABLE experiments ADD COLUMN env_json TEXT（不存在才添加）
+v2  CREATE TABLE experiment_systems（experiment-scoped 系统配置快照）
+```
+
+历史 `experiments` / `runs` 行在迁移中原样保留；迁移后新写入（含
+`save_experiment(..., env_json=...)`）必须成功。
 
 ---
 
@@ -523,15 +562,18 @@ Schema 版本通过 `PRAGMA user_version` 管理（当前 `2`）。打开任意�
 别人可以重新运行同一 experiment。
 
 实现上，Runner 把以上信息写入 `experiments` 表（`env_json` / `git_commit` /
-`vica_version` / `config_json`），并把每个 system 的解析后配置写入 `systems`
-表（`config_json`）。**不得保存 API Key / token / credential**。
+`vica_version` / `config_json`），并把每个 system 的解析后配置写入
+`experiment_systems` 表（`config_json`，experiment-scoped 快照）。
+**不得保存 API Key / token / credential；不得保存 verifier secret**。
 
 可复现性分级（不要宣称超出实际）：
 
 ```text
-Challenge 复现           强：相同 (version, seed, difficulty) => 相同 payload
-传统 Solver 复现         较强：确定性算法 + 记录的 config
-远程模型实验复现          记录 model/config/provider/date；不保证远程模型未来 bit-identical
+普通 family（CSP / OPT）复现  强：相同 (type, version, seed, difficulty) => 相同 payload 与 challenge_id
+secret-bound family 复现      强：相同 (type, version, seed, difficulty, verifier_material_commitment)
+                                   => 相同 payload 与 challenge_id
+传统 Solver 复现              较强：确定性算法 + 记录的 config
+远程模型实验复现              记录 model/config/provider/date；不保证远程模型未来 bit-identical
 ```
 
 即使 `temperature=0`，商业 LLM API 也不保证长期 bit-identical，文档/报告必须如实说明。
@@ -576,6 +618,7 @@ SYNTH-v0.1 把数据明确分为两类：
 
 ```text
 challenge_id / type / generator_version / difficulty / seed(公共) / public payload
+verifier_material_commitment（公开的 material 单向承诺）
 public examples / budget
 ```
 
@@ -593,9 +636,27 @@ hidden test seed / hidden test vectors / reference target program / verifier sec
 一个 verifier_secret（来自 `VICA_VERIFIER_SECRET`，或新生成写入 verifier-private 路径
 `<db所在目录>/private/<experiment>.material.json`，权限 0600；默认库 `.vica/vica.db`
 对应 `.vica/private/`）。**数据库实验中只保存材料的公开
-引用（`verifier_material_id` + `verifier_material_version`），绝不保存 secret 本身、绝不写入
+引用（`verifier_material_commitment` 完整承诺 + `verifier_material_id` 短 ID +
+`verifier_material_version`），绝不保存 secret 本身、绝不写入
 Challenge、绝不传给任何 Solver、不写入 solver-visible payload**。Solver 只拿到 public
 challenge，无法从公开 (seed, difficulty) 重建 target 或 hidden material。
+
+**权威 Verifier 必须先校验 material**：`verify_submission()` 在任意 hidden
+evaluation 之前，用传入的 secret 重新派生 commitment 并与
+`challenge.verifier_material_commitment` 比对：
+
+```text
+secret
+    ↓
+derive commitment
+    ↓
+compare challenge.verifier_material_commitment
+```
+
+不匹配（或承诺存在但未提供 secret）时：**不执行 hidden tests**，返回
+`INTERNAL_ERROR`（内部标记 `verifier_material_mismatch`）。这是 evaluator
+configuration failure，**绝不是 Solver 的 `INVALID_SOLUTION`**。
+Commitment 是单向承诺（SHA-256 + domain separation），公开后不可反推 secret。
 
 边界测试（`tests/test_synth_generator.py`）：
 

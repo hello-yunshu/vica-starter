@@ -37,7 +37,7 @@ VICA is a local research arena. The following components exist today:
 
 | Component | Status | Purpose |
 |-----------|--------|---------|
-| Protocol Core | Stable | Pydantic models, canonical serialization, interfaces |
+| Protocol Core | Stable | Pydantic models, canonical serialization, interfaces, challenge identity |
 | CSP-v0.1 | Stable | Infrastructure validation (constraint satisfaction) |
 | Random baseline | Stable | Floor baseline |
 | Z3 baseline | Stable | Traditional solver baseline |
@@ -75,6 +75,15 @@ VICA is a local research arena. The following components exist today:
 - Traditional-solver dominance is a valid research outcome.
 - Reproducibility metadata (git commit, VICA version, generator version, system
   config, environment manifest, seed) is persisted per experiment.
+- Challenge identity is reproducible from its declared inputs: for ordinary
+  families `(type, generator_version, seed, difficulty)`; for secret-bound
+  families additionally the `verifier_material_commitment` (full SHA-256 over a
+  domain-separated string incl. the material version), so same public seed with
+  different verifier material yields a different challenge_id.
+- The verifier refuses to evaluate hidden material when the supplied secret
+  does not commit to the challenge's material: that is an evaluator
+  configuration failure (`INTERNAL_ERROR`, reason `verifier_material_mismatch`),
+  never a solver `INVALID_SOLUTION`.
 - Hidden verifier material (hidden tests, reference solution, verifier secret) is
   isolated from solver inputs. See `docs/SPEC.md` "Verifier Material".
 
@@ -85,8 +94,10 @@ VICA is a local research arena. The following components exist today:
 >
 > What Evaluation Mode **guarantees**: the reference target and hidden tests are
 > secret-bound (HMAC-derived; the public seed alone cannot recover them), the
-> solver-visible challenge never contains verifier material, and the active
-> evaluator secret is never written into the solver-readable experiment DB.
+> solver-visible challenge never contains verifier material, the active
+> evaluator secret is never written into the solver-readable experiment DB, and
+> a secret-bound challenge commits to its verifier material so the verifier can
+> reject a wrong secret before any hidden evaluation.
 > What it does **not** guarantee: an agent with the verifier-private path or the
 > secret itself can still recover hidden material, so adversarial evaluation
 > MUST run the solver in a workspace that excludes the verifier-private state.
@@ -113,7 +124,8 @@ Historical / engineering-validation results are kept for provenance. They are
 
 - `docs/reports/csp-v0.1-first-run.md` — CSET Random vs Z3 (infrastructure validation).
 - `docs/reports/synth-v0.1-scale.md` — SYNTH random vs brute (engineering validation;
-  predates verifier-secret hidden-material isolation).
+  predates verifier-secret hidden-material isolation; uses the historical
+  generator `0.1.0` — the current post-isolation generator is `0.2.0`).
 - `docs/reports/opt-v0.1-scale.md` — OPT baselines with exact DP reference.
 
 Reports predating the hidden-material isolation explicitly disclose that they are
