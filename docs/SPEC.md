@@ -1,6 +1,6 @@
 # VICA Protocol & Technical Specification v0.1 / v0.2
 
-Status: v0.1 Frozen Core / v0.2 Extensions Under Development  
+Status: v0.1 Frozen Core / v0.2.0 Released (Benchmark Research & External Evaluation)
 Scope: Local Arena + CSP-v0.1 / SYNTH-v0.1 / OPT-v0.1 + External Evaluation
 
 ---
