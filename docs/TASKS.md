@@ -454,7 +454,7 @@ exec(candidate)
 - [x] LLM `max_retries=0` 与显式 `timeout_seconds` 以 `is not None` 判定，
       不退回环境默认值；`max_retries >= 0`、`timeout_seconds > 0` 校验
 - [x] `work/v0.1-freeze-final` 以 `origin/main` 为祖先（存在合法 merge-base）
-- [ ] 最终 PR（base: main, head: work/v0.1-freeze-final）在新 merge ref 上
+- [x] 最终 PR（base: main, head: work/v0.1-freeze-final）在新 merge ref 上
       CI 全绿（Install / Ruff / mypy / pytest）
 
 未完成项不得提前勾选。
