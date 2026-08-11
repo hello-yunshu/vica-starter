@@ -1,8 +1,8 @@
 # SYNTH-v0.1 Shortcut Audit
 
-> Status: **Partial** — public-ambiguity and constant/trivial-target shortcuts are
-> documented; a systematic brute-force ambiguity probe is `Not Yet Established`
-> for the current secret-bound generator `0.2.0`.
+> Status: **Partial** — the public ambiguity probe is `Established` on the current
+> secret-bound generator `0.2.0`; a quantitative hidden-generalization gap and
+> current-generator solver dominance are `Not Yet Established`.
 
 ## 1. What this audit checks
 
@@ -88,6 +88,7 @@ secret-bound generator before any claim about the current generator.
 
 - Interpreter-level resource guards are in place and tested (`SANDBOX_ERROR`).
 - Constant/trivial-target shortcut is mitigated by calibration filters.
-- A systematic ambiguity probe for the current generator is **not yet
-  established** — recommended next step before claiming SYNTH measures
-  generalization robustly.
+- The public ambiguity probe on the current `0.2.0` generator is **established** (§4).
+- A quantitative hidden-generalization gap and current-generator solver
+  dominance are **not yet established** — those remain open research items and
+  must not be claimed as measured.
