@@ -1,6 +1,6 @@
-# VICA Protocol & Technical Specification v0.1 → v0.4
+# VICA Protocol & Technical Specification v0.1 → v1.0
 
-Status: v0.1 Frozen Core / v0.2.0 Release (Benchmark Research & External Evaluation) / v0.3.0 Release (Agent Benchmark) / v0.4.0 Release (Benchmark Validation & Reproducibility)
+Status: v0.1 Frozen Core / v0.2.0 Release (Benchmark Research & External Evaluation) / v0.3.0 Release (Agent Benchmark) / v0.4.0 Release (Benchmark Validation & Reproducibility) / **v1.0.0 Release (Research Benchmark Stable)**
 Scope: Local Arena + CSP-v0.1 / SYNTH-v0.1 / OPT-v0.1 / REPO-v0.1 + External Evaluation
 
 ---
@@ -1064,4 +1064,77 @@ shortcut audit implemented
 reverify works
 old v0.2 tests green
 版本 0.3.0
+```
+
+---
+
+## 19. v1.0 Compatibility Contract
+
+v1.0.0 冻结以下协议与 Benchmark 表面，作为正式 **Research Benchmark Stable**。
+
+### 19.1 Stable surface
+
+```text
+Challenge
+Candidate
+Result
+Evaluation Bundle v1 / v2
+Submission Bundle v1 / v2
+Result Bundle v1 / v2
+Workspace
+Patch Candidate
+Task Pack
+Execution Profile
+Strict Reverify
+```
+
+Stable 语义包括：v1/v2 Bundle 读取（按各自 reader 解释，绝不静默重解释）、
+Challenge identity、canonical serialization、verifier authority（单一权威
+`vica eval verify`）、UNKNOWN cost 语义、verifier-material commitment、
+Result Bundle integrity、strict reverify。
+
+### 19.2 Experimental surface（仍允许后续演进）
+
+```text
+SYNTH scientific difficulty
+OPT research maturity
+OS sandbox hardened-security claims
+Docker backend（如实验性）
+agent-performance calibration
+```
+
+### 19.3 Stable ≠ Everything Mature
+
+```text
+Protocol stable
+REPO benchmark released
+SYNTH experimental
+OPT experimental
+OS sandbox experimental
+```
+
+不得把所有模块统一标为 Stable。外部 Coding Agent 实证校准仍为
+`Not Yet Established`，Verifier 正确性不依赖 LLM Judge。
+
+### 19.4 Package / platform
+
+```text
+version = 1.0.0
+requires-python >= 3.12
+supported: Linux, macOS
+unsupported in v1.0: Windows
+PyPI publication not configured
+```
+
+### 19.5 v1.0 判定标准
+
+```text
+P0 = 0, P1 = 0
+Protocol stable surface frozen
+v1/v2 compatibility fixtures load + reverify
+CLI UX audited
+wheel + sdist build
+fresh venv install smoke pass
+REPO / CSP / SYNTH / OPT regression green
+版本 1.0.0
 ```
