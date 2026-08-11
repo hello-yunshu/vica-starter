@@ -3,6 +3,30 @@
 All notable protocol changes to VICA are recorded here. Entries are concise and
 focus on protocol-level changes, not development churn.
 
+## 1.0.0 — Research Benchmark Stable (2026-08-12)
+
+**Protocol + benchmark surface frozen. Freeze / compatibility / release.**
+
+- **Protocol stable surface**: Challenge, Candidate, Result, Evaluation /
+  Submission / Result Bundle v1+v2, Workspace, Patch Candidate, Task Pack,
+  Execution Profile, Strict Reverify.
+- **Stable CLI**: `vica version / benchmark / report / eval prepare|inspect|
+  verify / solver run / agent run|noop|reference / reverify / study run`; CLI
+  UX audited (help text, path semantics, error messages).
+- **Compatibility contract** (`docs/SPEC.md`): v1/v2 Bundle reading, Challenge
+  identity, canonical serialization, verifier authority, UNKNOWN cost
+  semantics, material commitment, Result integrity, strict reverify all
+  **Stable**; SYNTH/OPT science, OS sandbox, Docker backend, agent-performance
+  calibration remain **Experimental**.
+- **Formal REPO Task Pack** `repo-v0.1-core`: ≥6 templates, ≥24 reproducible
+  instances, repair + implementation, difficulty 1–3; every released instance
+  passes reference, fails NoOp, reproduces workspace hash, and reverifies.
+- **Release docs**: `docs/MIGRATION.md`, `SECURITY.md`; README v1.0 status.
+- **Packaging**: wheel + sdist build, fresh-venv install smoke (`vica version`,
+  `vica --help`, minimal CSP + REPO verify/reverify).
+- Platform: Linux + macOS supported; Windows not supported in v1.0. PyPI
+  publication not configured.
+
 ## 0.4.0 — Benchmark Validation & Reproducibility (2026-08-12)
 
 **Reproducibility & validation layer over the v0.3 Agent Benchmark.**

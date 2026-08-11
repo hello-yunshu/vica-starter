@@ -305,3 +305,63 @@ vica reverify ...              -> identical valid / score / error semantics
 ```
 
 This is the true test of whether v0.2 is complete.
+
+---
+
+## 10. Bundle v2 (Agent Benchmark / REPO)
+
+Bundle v2 (`bundle_format_version: "2"`) extends the same three portable
+artifacts for the REPO Agent Benchmark. A **Bundle Dispatcher** routes an
+artifact strictly by its advertised `bundle_format_version`, so v1 artifacts are
+always read with the v1 reader and never silently re-interpreted with v2
+semantics (`docs/MIGRATION.md`).
+
+### 10.1 Evaluation Bundle v2
+
+```text
+<evaluation>/
+├── public/
+│   ├── manifest.json          # + challenge_type, generator_version, seed, instances
+│   ├── challenges.jsonl       # Challenge payloads (REPO: workspace_id + workspace_hash)
+│   └── workspaces/<challenge-id>/   # solver-visible workspace (text files only)
+└── private/
+    ├── manifest.json
+    └── verifier-material.json # evaluator secret (0600), never shipped to the agent
+```
+
+A REPO challenge payload carries `workspace_id`, `workspace_hash`, `task_kind`
+(`repair` | `implementation`), `language`, `task`, and `constraints`
+(allowed/forbidden paths, max changed files/bytes). The solution workspace is
+identified by a canonical `workspace_hash` over sorted `(relative_path,
+sha256(content))`; hidden tests and the reference patch are secret-bound and
+never placed in the public workspace.
+
+### 10.2 Submission Bundle v2
+
+The candidate is a **patch artifact** (git unified diff), not a full modified
+tree. Each row references `challenge_id` + a patch file (or hash). Limits bound
+`MAX_PATCH_BYTES` / `MAX_CHANGED_FILES` / `MAX_CHANGED_LINES`. The manifest may
+carry `system_metadata`; when produced by the VICA Agent Runner it includes an
+**Execution Profile** (env **names** only, never secret values) under trusted
+runner telemetry.
+
+### 10.3 Result Bundle v2
+
+Adds the v0.4 reproducibility bindings to the v1 manifest:
+
+```json
+{
+  "result_bundle_version": "2",
+  "task_pack_id": "repo-v0.1-core",
+  "task_pack_version": "1",
+  "task_pack_hash": "<sha256 hex>",
+  "workspace_hash": "<sha256 hex>",
+  "patch_hash": "<sha256 hex>",
+  "environment": { "execution_profile": { ... } }
+}
+```
+
+A v2 Result Bundle **never** contains the verifier secret, hidden test content,
+or the reference patch. Strict reverify binds `task_pack_hash` + `workspace_hash`
++ `patch_hash` so a tampered task set or result is detected even when
+`valid` / `score` coincide.
