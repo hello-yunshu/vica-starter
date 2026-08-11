@@ -10,7 +10,7 @@ tardiness:
     T_j   = max(0, C_j - d_j)
     score = - sum_j T_j            (larger is better; 0 means zero tardiness)
 
-1||sum T_j is NP-hard but admits an exact pseudo-polynomial / bitmask DP, so
+1||sum T_j is NP-hard but admits an exact bitmask DP (O(n * 2^n)), so
 the challenge offers a continuous score while keeping a cheap, deterministic
 verifier. The verifier never judges solution quality — only legality and the
 objective value.
@@ -140,9 +140,23 @@ class OptV01:
 
     type_name = TYPE_NAME
     generator_version = GENERATOR_VERSION
+    # OPT-v0.1 is not secret-bound: the public problem IS the challenge and
+    # there is no hidden reference target, so no verifier secret is required.
+    requires_verifier_secret = False
 
     def generate(self, seed: str, difficulty: int) -> dict[str, Any]:
         return generate(seed, difficulty)
+
+    def generate_with_solution(
+        self, seed: str, difficulty: int, verifier_secret: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Non-secret family: the public payload is the whole challenge.
+
+        There is no verifier-only solution material, so the solution dict is
+        empty. Conformance-only; never invoked (``requires_verifier_secret`` is
+        False), but present so all families satisfy the ChallengeFamily protocol.
+        """
+        return self.generate(seed, difficulty), {}
 
     def verify(self, challenge: Any, candidate: Any) -> bool:
         return self.evaluate(challenge, candidate).valid

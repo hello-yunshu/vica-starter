@@ -38,11 +38,32 @@ def available_types() -> list[str]:
 
 
 def build_challenge(
-    type_name: str, seed: str, difficulty: int, *, generator_version: str | None = None
+    type_name: str,
+    seed: str,
+    difficulty: int,
+    *,
+    generator_version: str | None = None,
+    verifier_secret: str | None = None,
 ) -> Challenge:
-    """Generate a Challenge object with a canonical, deterministic id."""
+    """Generate a Challenge object with a canonical, deterministic id.
+
+    For families whose reference material is secret-bound
+    (``requires_verifier_secret``, currently SYNTH-v0.1), a solver-usable
+    challenge — including the public examples, whose expected outputs require
+    the reference target — can only be assembled by an authority holding the
+    verifier secret. Without it, only the public-generation part
+    (``family.generate``) is produced. The challenge payload never carries the
+    secret, the target, or the hidden tests; the authoritative verifier
+    reinjects the secret at verification time.
+    """
     family = get_family(type_name)
-    payload = family.generate(seed, difficulty)
+    if getattr(family, "requires_verifier_secret", False):
+        if verifier_secret is None:
+            payload = family.generate(seed, difficulty)
+        else:
+            payload, _ = family.generate_with_solution(seed, difficulty, verifier_secret)
+    else:
+        payload = family.generate(seed, difficulty)
     if generator_version is not None and generator_version != family.generator_version:
         raise ValueError(
             f"generator_version mismatch: requested {generator_version!r}, "

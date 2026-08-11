@@ -232,11 +232,25 @@ class CSPV01:
 
     type_name = TYPE_NAME
     generator_version = GENERATOR_VERSION
+    # CSP-v0.1 is not secret-bound: the public problem IS the challenge and
+    # there is no hidden reference target, so no verifier secret is required.
+    requires_verifier_secret = False
 
     # ---------------------------------------------------------------- generate
 
     def generate(self, seed: str, difficulty: int) -> dict[str, Any]:
         return generate(seed, difficulty)
+
+    def generate_with_solution(
+        self, seed: str, difficulty: int, verifier_secret: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Non-secret family: the public payload is the whole challenge.
+
+        There is no verifier-only solution material, so the solution dict is
+        empty. Conformance-only; never invoked (``requires_verifier_secret`` is
+        False), but present so all families satisfy the ChallengeFamily protocol.
+        """
+        return self.generate(seed, difficulty), {}
 
     # ---------------------------------------------------------------- verifier
 
