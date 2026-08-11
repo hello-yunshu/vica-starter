@@ -4,6 +4,8 @@ English | [简体中文](README.zh-CN.md)
 
 **Verifiable Intelligence Compute Arena** · 可验证智能计算竞技场
 
+**VICA 1.0 — Research Benchmark Stable**
+
 A local research arena for measuring how different compute systems — LLMs, coding
 agents, traditional algorithms, and hybrid systems — perform on automatically
 generated, objectively verifiable tasks.
@@ -33,7 +35,10 @@ Design principles:
 
 ## Current Status
 
-VICA is a local research arena. The following components exist today:
+VICA 1.0 freezes the protocol and benchmark surface below. It is a **Local
+Research Arena** — no hosted service, no online leaderboard, no hardened
+arbitrary-code sandbox. See `docs/SPEC.md` "Compatibility Contract" and
+`docs/MIGRATION.md`.
 
 | Component | Status | Purpose |
 |-----------|--------|---------|
@@ -211,11 +216,14 @@ vica reverify ./results --evaluation ./bench --verifier-secret "$VICA_VERIFIER_S
 - [Protocol & Technical Specification](docs/SPEC.md)
 - [Benchmark Methodology](docs/BENCHMARK_METHODOLOGY.md)
 - [Bundle Formats](docs/protocol/BUNDLE.md)
+- [Reproducibility](docs/REPRODUCIBILITY.md)
+- [Migration Guide](docs/MIGRATION.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Implementation Tasks](docs/TASKS.md)
 - [Challenge Research Lab](docs/challenge-research/README.md)
 - [REPO-v0.1 Research Lab](docs/challenge-research/repo/README.md)
 - [Changelog](CHANGELOG.md)
+- [Security](SECURITY.md)
 - Experiment reports: `docs/reports/`
 
 ---

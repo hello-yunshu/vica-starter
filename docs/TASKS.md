@@ -682,3 +682,41 @@ exec(candidate)
       README.zh-CN / CHANGELOG）
 
 未完成项不得提前勾选。
+
+---
+
+# v1.0.0 — Research Benchmark Stable
+
+> v1.0.0 = Freeze / Compatibility / Release（协议与 Benchmark 表面正式冻结，不新增功能）。
+
+## Milestone F1 — Protocol Stable Surface + Compatibility Contract
+
+- [x] Challenge / Candidate / Result 稳定表面冻结
+- [x] Evaluation / Submission / Result Bundle v1+v2 稳定读取（dispatcher）
+- [x] Workspace / Patch Candidate / Task Pack / Execution Profile / Strict Reverify 冻结
+- [x] `docs/SPEC.md` §19 v1.0 Compatibility Contract（Stable vs Experimental）
+- [x] `docs/MIGRATION.md`（v1/v2 读取与 reverify / 仅 inspect 的历史 generator）
+- [x] `docs/protocol/BUNDLE.md` 覆盖 v2
+
+## Milestone F2 — Stable CLI + UX Audit
+
+- [x] `vica --help` / `eval --help` / `agent --help` / `reverify --help` / `study --help` 审计
+- [x] 统一错误语义（用户输入错误 exit nonzero + 干净信息，非巨大 traceback）
+
+## Milestone F3 — Release Docs + Packaging
+
+- [x] `docs/REPRODUCIBILITY.md` / `docs/BENCHMARK_METHODOLOGY.md` / `docs/protocol/BUNDLE.md`
+- [x] `SECURITY.md`（verifier correctness / agent secret isolation / sandbox limits）
+- [x] README v1.0 状态 + Quick Start 真实可运行路径
+- [x] CHANGELOG 1.0.0 / 0.4.0 / 0.3.0 / 0.2.0 / 0.1.0
+- [x] 版本 1.0.0（pyproject / __init__ / 一致性 test）
+- [x] Formal REPO Task Pack `repo-v0.1-core`（≥6 templates、≥24 instances）
+- [x] wheel + sdist 构建 + fresh venv 安装 smoke（`vica version` / `--help` / 最小 CSP+REPO verify/reverify）
+
+## 测试与门禁
+
+- [x] 完整 final gate PASS：`ruff check .` / `mypy src` / `pytest -q`
+- [x] v1/v2 compatibility fixtures load + reverify
+- [x] REPO / CSP / SYNTH / OPT regression 保留（不删老测试）
+- [x] 版本一致性 1.0.0
+- [x] Repo hygiene（无 prompt / 无 DB / 无 .vica runtime）

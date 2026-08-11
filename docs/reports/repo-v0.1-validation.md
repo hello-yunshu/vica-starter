@@ -4,6 +4,21 @@
 > current generator `0.1.0`. Only measured data is reported; anything not
 > measured is explicitly `Not Measured`.
 
+## 0. v1.0 release-gate run (formal Task Pack `repo-v0.1-core`)
+
+A separate 24-instance run meets the v1.0 formal Task Pack gate
+(`docs/SPEC.md` §104–§105):
+
+- Task Pack: `repo-v0.1-core` (version `1`), evaluation `eval-6696596c7378`
+- Generator `repo-v0.1` `0.1.0`, seed `11`, difficulties 1–3, 8 instances each
+- Template coverage across 24 instances: all **6** templates present
+  (`parser` 7, `serialization` 6, `state_machine` 6, `cache` 2, `scheduler` 2,
+  `storage` 1)
+- Reference (positive control): **24 / 24 pass**
+- NoOp (negative control): **0 / 24 pass**
+- Reverify: **24 / 24 matched**, identical valid/score/error semantics
+- Result Bundles bind `task_pack_id` / `task_pack_version` / `task_pack_hash`
+
 ## 1. Run provenance
 
 - Task Pack: `repo-v0.1-core` (version `1`)
