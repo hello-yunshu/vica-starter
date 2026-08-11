@@ -458,3 +458,98 @@ exec(candidate)
       CI 全绿（Install / Ruff / mypy / pytest）
 
 未完成项不得提前勾选。
+
+---
+
+# v0.2.0 — Benchmark Research & External Evaluation
+
+> v0.1.0 = Research Integrity / Protocol Foundation Freeze
+> v0.2.0 = Benchmark Research & External Evaluation
+
+## Milestone M1 — v0.2 Workspace
+
+- [x] 从最新 `main` 创建 `work/v0.2-benchmark-research`
+- [x] ROADMAP / TASKS / SPEC 版本定位更新（v0.1 Freeze / v0.2 Bench Research）
+
+## Milestone M2 — Evaluation Bundle
+
+- [x] `vica eval prepare`：生成 public+private 分离的 Evaluation Bundle
+- [x] Public Bundle：evaluation_id / bundle_format_version / challenge_type /
+      generator_version / seed / difficulty / challenge_id /
+      verifier_material_commitment / public payload / challenges_hash
+- [x] Private Bundle：verifier_material_commitment / verifier_material_id /
+      verifier_secret（0600），保持最小（不重复保存 hidden tests）
+- [x] manifest_hash = SHA-256(canonical manifest without hash)，用
+      `vica.protocol.serialization`
+- [x] `vica eval inspect`：manifest parse / bundle version / challenge count /
+      重复 id / public-private 一致性 / manifest hash / tamper 检测
+- [x] 安全边界文档：public/private 是 evaluator bundle organization，非 OS 隔离；
+      Coding Agent 只能拿 `public/`
+
+## Milestone M3 — External Solver Protocol
+
+- [x] File Exchange（Mode A）：solver 读 public challenges → 写 `submissions.jsonl`
+- [x] Command Solver（Mode B）：`vica solver run --command ...`，stdin→challenge，
+      stdout→candidate
+- [x] Submission Bundle：manifest（evaluation_id / system_id / created_at）+
+      submissions.jsonl
+- [x] 基础验证：unknown challenge id → reject；missing challenge → NO_SUBMISSION；
+      duplicate challenge id → reject ambiguous input
+- [x] NO_SUBMISSION 与 INVALID_SOLUTION 在报告层区分
+- [x] 单条 malformed candidate 不丢弃整批（per-instance failure）
+- [x] candidate JSON schema 错误 → INVALID_SCHEMA 进入结果
+
+## Milestone M4 — Result Bundle + Reverify
+
+- [x] `vica eval verify`：load public + private → 校验 hash → match challenge_id →
+      reconstruct Challenge → 校验 material commitment → 权威 `verify_submission()`
+- [x] 复用 `verify_submission()`，不建第二套 verifier
+- [x] Result Bundle：manifest / evaluation.json / system.json / environment.json /
+      challenges.jsonl / submissions.jsonl / results.jsonl / metrics.json / report.md
+- [x] Result Bundle 记录：bundle_format_version / evaluation manifest hash / VICA
+      version / git commit / generator version / commitment / system / raw
+      submissions / raw results / metrics / environment
+- [x] Result Bundle 不含 verifier secret / hidden tests（无泄漏测试）
+- [x] Result Bundle manifest 含 bundle_hash / 各文件 sha256（tamper 检测）
+- [x] `vica reverify <result-bundle> --evaluation <eval>`：strict reverify
+      （same generator version / commitment / challenge id），不重新调用 Solver
+- [x] evaluator-level 错误（wrong private material / corrupt private / hash
+      mismatch / unknown generator）与 solver outcome 分离
+
+## Milestone M5 — Benchmark Methodology
+
+- [x] `docs/BENCHMARK_METHODOLOGY.md`
+- [x] `docs/protocol/BUNDLE.md`（Bundle 格式）
+- [x] Wilson 95% CI（标准库实现，不依赖 SciPy）
+- [x] latency：mean / p50 / p95
+- [x] cost：known cost coverage = known / total
+- [x] failure taxonomy：valid / invalid_solution / timeout / transport_error /
+      provider_error / parse_error / no_candidate / no_submission /
+      sandbox_error / internal_error / unsupported
+- [x] failure report：counts / rates / by difficulty
+- [x] paired comparison（A wins / B wins / tie / both fail）
+- [x] answer-first `report.md`：Evaluation / System / Challenges / Valid rate /
+      95% CI / Latency / cost coverage / main failure modes / OPT regret
+- [x] 不做排行榜幻觉：默认 per-family / per-difficulty / per-metric 输出
+
+## Milestone M6 — SYNTH Calibration / Challenge Research Lab
+
+- [x] `docs/challenge-research/README.md`
+- [x] SYNTH shortcut audit / difficulty calibration / generalization /
+      solver dominance 文档（无数据时如实写 Not Yet Established）
+- [x] ambiguity probe 方法文档（public tests 是否足以约束 target）
+- [x] Go / Pivot / No-Go 退出条件
+
+## 测试与门禁
+
+- [x] Evaluation Bundle / Manifest integrity / External Solver protocol /
+      Submission Bundle / Authoritative verify / Result Bundle / Reverify /
+      Statistics / Failure taxonomy 测试全部新增
+- [x] 回归门禁 PASS：`ruff check .` / `mypy src` / `pytest -q`（旧 Research
+      Integrity 测试未删除）
+- [x] E2E：CSP + SYNTH + OPT 各跑通 prepare → submit → verify → bundle → reverify
+- [x] CLI smoke：prepare / solver run / verify / reverify / inspect / tamper
+- [x] private material 不泄漏进 public bundle（grep 验证）
+- [x] 确认无工作提示词、无 runtime DB 提交
+
+未完成项不得提前勾选。
