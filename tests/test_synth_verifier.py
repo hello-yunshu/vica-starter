@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from vica.challenges.synth_v01 import FAMILY, TYPE_NAME, generate_with_solution
+from vica.challenges.synth_v01 import (
+    FAMILY,
+    TYPE_NAME,
+    VERIFIER_SECRET_KEY,
+    generate_with_solution,
+)
 from vica.challenges.synth_v01.family import (
     MAX_EVAL_STEPS,
     MAX_INT_BITS,
@@ -22,15 +27,18 @@ from vica.challenges.synth_v01.family import (
 )
 from vica.protocol.models import ErrorCode
 
+TEST_SECRET = "test-verifier-secret"
+
 
 @pytest.fixture()
 def challenge() -> tuple[dict, dict]:
-    payload, sol = generate_with_solution("verifier-seed", 3)
+    payload, sol = generate_with_solution("verifier-seed", 3, TEST_SECRET)
     full = {
         "type": TYPE_NAME,
         "seed": "verifier-seed",
         "difficulty": 3,
         "payload": payload,
+        VERIFIER_SECRET_KEY: TEST_SECRET,
     }
     return full, sol
 

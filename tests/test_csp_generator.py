@@ -41,6 +41,16 @@ def test_difficulty_scales_variable_count() -> None:
     assert list(counts.values()) == sorted(set(counts.values()))
 
 
+@pytest.mark.parametrize("difficulty", range(1, MAX_DIFFICULTY + 1))
+def test_constraint_count_always_exactly_matches_preset(difficulty: int) -> None:
+    """A seed sweep must never emit a weaker instance: len(constraints) always
+    equals the preset target count (SPEC 10, P1 CSP integrity)."""
+    _, expected_constraints = DIFFICULTY_PRESETS[difficulty]
+    for i in range(120):
+        payload = generate(f"integrity-sweep-{i}", difficulty)
+        assert len(payload["constraints"]) == expected_constraints
+
+
 def test_different_difficulties_never_same_payload() -> None:
     p1 = generate("seed", 1)
     p3 = generate("seed", 3)
@@ -76,6 +86,17 @@ def test_build_challenge_id_stable() -> None:
     assert a.id != c.id
     assert a.type == TYPE_NAME
     assert a.generator_version == FAMILY.generator_version
+
+
+def test_ordinary_challenge_identity_unaffected_by_material_commitment() -> None:
+    """CSP-v0.1 is not secret-bound: same (version, seed, difficulty) yields
+    the same payload and challenge_id, deterministically — and the family
+    carries no material commitment."""
+    a = build_challenge(TYPE_NAME, "csp-id-1", 2)
+    b = build_challenge(TYPE_NAME, "csp-id-1", 2)
+    assert a.id == b.id
+    assert a.payload == b.payload
+    assert a.verifier_material_commitment is None
 
 
 def test_constraint_operators_present() -> None:

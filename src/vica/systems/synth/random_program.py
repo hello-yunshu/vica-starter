@@ -28,6 +28,7 @@ class RandomProgramSystem:
     """Random AST generation; the floor baseline for SYNTH-v0.1."""
 
     system_id = "synth-random"
+    supported_challenge_types: frozenset[str] = frozenset({"synth-v0.1"})
 
     def __init__(
         self,
@@ -38,6 +39,9 @@ class RandomProgramSystem:
         self.attempts = attempts
         self.max_seconds = max_seconds
         self.seed = seed
+
+    def config(self) -> dict[str, Any]:
+        return {"attempts": self.attempts, "max_seconds": self.max_seconds, "seed": self.seed}
 
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         if isinstance(challenge, dict):

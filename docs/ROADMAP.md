@@ -4,6 +4,16 @@
 
 > 先验证“可验证智能任务是否成立”，再建设平台；先有实验数据，再定义指标；先攻击 Challenge，再扩大生态。
 
+## 当前研究状态（Research Integrity & Stabilization Freeze）
+
+仓库中已有 SYNTH-v0.1 / OPT-v0.1 / OS 沙箱的**代码 prototype**，但这**不**等于
+对应 Phase 已完成。Roadmap 里的 Phase 表示**研究成熟度与正式退出条件**；代码
+prototype ≠ milestone complete。当前把它们标为 *Experimental / Under Review*，
+只有满足退出条件并经过外部复核后才算完成。
+
+Public API / hosted arena（Phase 6）是**有意延期**（intentional deferral），
+在 challenge integrity 与 reproducibility 成熟之前不实施，这并非缺失功能。
+
 ---
 
 ## Phase 0 — Protocol Foundation

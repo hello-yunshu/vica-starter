@@ -11,9 +11,20 @@
 **Raw data**: `synth-v0.1-first-run-runs.json`, `synth-v0.1-first-run-metrics.csv`
 **Database**: `/tmp/vica-synth-exp.db`
 
+> **Generator 版本**：当前 SYNTH 实现使用 `generator_version` **0.2.0**
+> （target / hidden / public examples 全部 secret-bound）。本报告所有数字
+> 均来自历史 `generator_version` **0.1.0**（target 由 public seed 派生），
+> 早于 verifier-material isolation，两者不可直接比较。
+
 > 本报告是 SYNTH-v0.1 挑战族的首次小规模验收实验。目的是验证程序合成挑战族的
 > 生成 / 验证 / 基线闭环是否工作，并初步观察难度区分度——尤其是设计文档中提出的
 > Risk 1（SYNTH-v0.1 能否被穷举求解）。
+
+> **历史实验状态（research-integrity note）**：本实验在 verifier-secret 隔离
+> （hidden-material isolation）落地前完成。当时隐藏测试可从公开的
+> `(seed, difficulty)` 确定性重建，因此**不能**将该实验视为 adversarial public
+> benchmark（对抗性公开基准）。它仅用于工程闭环验证。隐藏材料的 secret-派生隔离
+> 见 `docs/SPEC.md` "Verifier material" 与 `test_synth_generator.py`。
 
 ---
 

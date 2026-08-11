@@ -67,6 +67,7 @@ class BruteForceSynthSystem:
     """Enumerative program search; the traditional-solver baseline."""
 
     system_id = "synth-brute"
+    supported_challenge_types: frozenset[str] = frozenset({"synth-v0.1"})
 
     def __init__(
         self,
@@ -77,6 +78,13 @@ class BruteForceSynthSystem:
         self.max_nodes = max_nodes
         self.max_candidates = max_candidates
         self.max_seconds = max_seconds
+
+    def config(self) -> dict[str, Any]:
+        return {
+            "max_nodes": self.max_nodes,
+            "max_candidates": self.max_candidates,
+            "max_seconds": self.max_seconds,
+        }
 
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         if isinstance(challenge, dict):

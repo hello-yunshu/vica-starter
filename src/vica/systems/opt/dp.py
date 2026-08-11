@@ -62,6 +62,10 @@ class DpOptSystem:
     """Exact DP solver; the precise traditional baseline."""
 
     system_id = "opt-dp"
+    supported_challenge_types: frozenset[str] = frozenset({"opt-v0.1"})
+
+    def config(self) -> dict[str, Any]:
+        return {"strategy": "dp-exact", "algorithm": "bitmask-held-karp"}
 
     def solve(self, challenge: dict[str, Any]) -> SolveOutput:
         payload = challenge.get("payload", {})

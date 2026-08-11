@@ -15,7 +15,9 @@ Before changing protocol, challenge, verifier, benchmark, or metrics code, read:
 
 1. Core verification is deterministic.
 2. Correctness never depends on an LLM judge.
-3. Challenge generation is reproducible from version + seed + difficulty.
+3. Challenge generation is reproducible from its declared identity inputs:
+   version + seed + difficulty, plus verifier-material commitment for
+   secret-bound challenge families.
 4. Solver output is untrusted.
 5. Every challenge has a traditional/non-AI baseline.
 6. Benchmark code does not favor a particular provider or model.
