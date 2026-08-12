@@ -1114,11 +1114,18 @@ agent-performance calibration
 
 ```text
 Protocol stable
-REPO benchmark released
+REPO-v0.1 experimental（v1.0.1 降级）
 SYNTH experimental
 OPT experimental
 OS sandbox experimental
 ```
+
+REPO-v0.1 在 v1.0.1 降级为 Experimental：公开 `Template.builder` 仍可被枚举，
+持有 public `solution.py` + template name + 已安装公开 VICA 包即可恢复精确
+reference 源（本轮已在 `parser` 模板实证）。exact-reference lookup resistance
+标记为 **Not Yet Established**（禁止用 HMAC / 随机变量 / 私有命名伪装关闭），
+直至 semantic-oracle verifier 或其他真正消除 lookup 的设计被独立审计确认。
+VICA Framework 1.0.1（协议表面与 Bundle 语义）保持 Stable。
 
 不得把所有模块统一标为 Stable。外部 Coding Agent 实证校准仍为
 `Not Yet Established`，Verifier 正确性不依赖 LLM Judge。
