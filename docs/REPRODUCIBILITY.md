@@ -44,7 +44,9 @@ A **Task Pack** is the stable, versioned identity of a benchmark instance set
 (the concrete challenge ids, and for REPO their workspace hashes). It is what
 makes a result comparable across systems and runs:
 
-- `task_pack_id` — stable logical family name (e.g. `repo-v0.1-core`).
+- `task_pack_id` — stable logical family name (dynamic REPO evaluations are
+  `repo-v0.1-generated`; `-core` is reserved for a truly frozen official pack,
+  none established this round).
 - `task_pack_version` — bumped whenever task *semantics* change; a released
   task pack is never silently mutated.
 - `task_pack_hash` — SHA-256 of the canonical serialization of the task-set
@@ -53,6 +55,11 @@ makes a result comparable across systems and runs:
 A Result Bundle records `task_pack_id` / `task_pack_version` / `task_pack_hash`,
 and strict reverify binds the hash so a tampered result set is detected even
 when valid/score happen to coincide.
+
+Dynamic REPO work is generated with generator `0.2.0` and Task Pack version `2`.
+The historical REPO generator `0.1.0` is **withdrawn** for adversarial benchmark
+use (its candidate execution shared the verifier interpreter); it is **not**
+re-interpreted under `0.2.0` semantics.
 
 See `src/vica/eval/taskpack.py`.
 
@@ -72,6 +79,11 @@ vica study run \
   --replicates 3 \
   --verifier-secret "$VICA_VERIFIER_SECRET"
 ```
+
+Per-replicate result bundles are persisted under `<study-out>/runs/<sid>/r<rep>/`
+and are **never deleted** after `run_study` returns, using portable relative
+paths and `by_difficulty` / `by_task_kind` / `by_template` layered metrics, so a
+study's raw results remain available for later reverify.
 
 See `src/vica/eval/study.py` and `src/vica/eval/stats.py`.
 

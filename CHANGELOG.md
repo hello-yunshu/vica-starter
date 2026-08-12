@@ -3,6 +3,52 @@
 All notable protocol changes to VICA are recorded here. Entries are concise and
 focus on protocol-level changes, not development churn.
 
+## 1.0.1 — Research Integrity Hotfix (2026-08-12)
+
+**Research-integrity fix for the REPO-v0.1 Agent Benchmark plus protocol
+consistency.**
+
+### Fixed
+
+- **Process-separated REPO candidate verification** (`src/vica/repo/family.py`):
+  candidate `solve` runs in an isolated subprocess that receives only the case
+  inputs; the parent evaluator owns the expected values, so candidate frames can
+  never inspect or monkeypatch them. Closes the v1.0.0 hidden-expected
+  interpreter-leak bypass.
+- **Static reference-source leakage removed** (`src/vica/repo/templates.py`):
+  the public `fixed`/reference source is no longer reachable through a
+  secretless public API; authoritative reference material now requires the
+  verifier secret.
+- **REPO generator `0.1.0 → 0.2.0`** (`src/vica/repo/generator.py`): seed now
+  genuinely varies the solver-visible code instance (not just hidden cases),
+  and reference material is secret-bound.
+- **Historical `0.1.0` semantics withdrawn**: v1.0.0 generator/verifier
+  semantics are not silently re-interpreted under 0.2.0; historical results are
+  marked withdrawn and authoritative reverify under the old semantics is refused.
+- **Task Pack `1 → 2`** (`src/vica/eval/taskpack.py`): dynamic REPO evaluations
+  are now `repo-v0.1-generated` (the `core` id is reserved for a truly frozen
+  pack).
+- **v2 workspace integrity inspection** (`src/vica/eval/bundle.py`):
+  `vica eval inspect` validates `public/workspaces/` (existence, symlink safety,
+  hash, manifest, set consistency).
+- **Strict bundle-version pairing** (`dispatch.py`/`submission.py`/`reverify.py`):
+  Evaluation v1 ↔ Submission v1 ↔ Result v1 and v2 ↔ v2 ↔ v2 only; cross-version
+  matches are an `EvaluationFailure`.
+- **Study result persistence** (`src/vica/eval/study.py`): per-replicate
+  `submission/` and `result/` bundles persist after the study returns, with
+  portable relative paths and full provenance.
+- **Study task/template layered metrics**: `by_task_kind` and `by_template`
+  (with `by_difficulty`) are now accumulated from Result records.
+
+### Notes
+
+- v1.0.0 REPO generator `0.1.0` was withdrawn for adversarial benchmark use
+  because candidate execution shared the verifier interpreter and allowed
+  verifier-frame expected-value access. This is a benchmark research-integrity
+  flaw — not a hardened-host sandbox escape claim.
+- No `v1.0.1` tag or Release is created in this round; the branch awaits
+  independent audit.
+
 ## 1.0.0 — Research Benchmark Stable (2026-08-12)
 
 **Protocol + benchmark surface frozen. Freeze / compatibility / release.**

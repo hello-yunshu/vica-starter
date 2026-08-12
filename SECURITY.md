@@ -13,6 +13,11 @@
   output is untrusted.
 - Challenge identity and Result integrity rely on canonical serialization and
   SHA-256 hashes (manifest / challenge / bundle hashes).
+- Candidate REPO verification is **process-separated**: the candidate subprocess
+  receives only the case inputs, and the parent evaluator owns the expected
+  values, so candidate Python frames cannot access evaluator-owned expected
+  values. This is a **verifier correctness boundary**, not a hardened OS
+  security claim.
 
 ## Secret isolation for coding agents
 
