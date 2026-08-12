@@ -164,6 +164,21 @@ def _load_metrics(res: Path) -> dict[str, Any]:
         return {}
 
 
+def _validate_study_systems(systems: list[StudySystem]) -> None:
+    """Preflight system_id validation — must run before any Study side effect.
+
+    Every system_id is validated as a single safe path component and must be
+    unique across the Study. Doing this up front means an invalid or duplicate
+    ``system_id`` can never leave a partial ``runs/`` tree or run any Agent.
+    """
+    seen: set[str] = set()
+    for spec in systems:
+        system_id = _safe_component(spec.system_id)
+        if system_id in seen:
+            raise ValueError(f"duplicate Study system_id: {system_id!r}")
+        seen.add(system_id)
+
+
 def run_study(
     *,
     evaluation: str | Path,
@@ -179,6 +194,9 @@ def run_study(
     """
     if replicates < 1:
         raise ValueError("replicates must be >= 1")
+    # Preflight ALL system_ids (validity + uniqueness) before any side effect:
+    # no out/ dir, no runs/, no Agent, no submission/result.
+    _validate_study_systems(systems)
     public_manifest = load_public_manifest(evaluation)
     task_pack = derive_task_pack(public_manifest, _challenges(evaluation))
 
