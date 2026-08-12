@@ -106,7 +106,7 @@ def test_study_run_reference_noop(tmp_path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "task pack id:  repo-v0.1-core" in result.output
+    assert "task pack id:  repo-v0.1-generated" in result.output
     assert "reference" in result.output
     assert "noop" in result.output
     assert (out_dir / "study.json").is_file()
