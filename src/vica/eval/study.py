@@ -23,7 +23,7 @@ the best attempt (§75).
 from __future__ import annotations
 
 import json
-import tempfile
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -71,12 +71,16 @@ class ReplicateResult:
 def _run_system_once(
     spec: StudySystem,
     evaluation: str | Path,
-    workdir: Path,
+    run_dir: Path,
     replicate: int,
     verifier_secret: str | None,
+    study_root: Path,
 ) -> ReplicateResult:
-    sub = workdir / f"{spec.system_id}-r{replicate}"
-    res = workdir / f"{spec.system_id}-r{replicate}-result"
+    # Each replicate owns a persistent directory ``<study-out>/runs/<sid>/r<rep>``
+    # containing the `submission/` and `result/` bundles. They are never deleted
+    # after the study returns (docs §22-25).
+    sub = run_dir / "submission"
+    res = run_dir / "result"
     if spec.kind == "agent":
         assert spec.command
         run_agent(
@@ -97,7 +101,7 @@ def _run_system_once(
             verifier_secret=spec.verifier_secret or verifier_secret or "",
         )
     elif spec.kind == "submission":
-        return _verify_existing(spec, evaluation, res)
+        return _verify_existing(spec, evaluation, res, study_root)
     else:  # pragma: no cover - exhaustive
         raise ValueError(f"unknown system kind {spec.kind!r}")
 
@@ -111,7 +115,7 @@ def _run_system_once(
     return ReplicateResult(
         system_id=spec.system_id,
         replicate=replicate,
-        result_bundle=str(res),
+        result_bundle=_portable_rel(study_root, res),
         valid=int(summary["valid"]),
         challenge_count=int(summary["challenge_count"]),
         no_submission=int(summary["no_submission"]),
@@ -119,8 +123,13 @@ def _run_system_once(
     )
 
 
+def _portable_rel(root: Path, path: Path) -> str:
+    """A POSIX-style path relative to the study root (portable, no /tmp leaks)."""
+    return path.relative_to(root).as_posix()
+
+
 def _verify_existing(
-    spec: StudySystem, evaluation: str | Path, res: Path
+    spec: StudySystem, evaluation: str | Path, res: Path, study_root: Path
 ) -> ReplicateResult:
     assert spec.submission is not None
     summary = verify_evaluation(
@@ -133,7 +142,7 @@ def _verify_existing(
     return ReplicateResult(
         system_id=spec.system_id,
         replicate=0,
-        result_bundle=str(res),
+        result_bundle=_portable_rel(study_root, res),
         valid=int(summary["valid"]),
         challenge_count=int(summary["challenge_count"]),
         no_submission=int(summary["no_submission"]),
@@ -155,6 +164,21 @@ def _load_metrics(res: Path) -> dict[str, Any]:
         return {}
 
 
+def _validate_study_systems(systems: list[StudySystem]) -> None:
+    """Preflight system_id validation — must run before any Study side effect.
+
+    Every system_id is validated as a single safe path component and must be
+    unique across the Study. Doing this up front means an invalid or duplicate
+    ``system_id`` can never leave a partial ``runs/`` tree or run any Agent.
+    """
+    seen: set[str] = set()
+    for spec in systems:
+        system_id = _safe_component(spec.system_id)
+        if system_id in seen:
+            raise ValueError(f"duplicate Study system_id: {system_id!r}")
+        seen.add(system_id)
+
+
 def run_study(
     *,
     evaluation: str | Path,
@@ -170,6 +194,9 @@ def run_study(
     """
     if replicates < 1:
         raise ValueError("replicates must be >= 1")
+    # Preflight ALL system_ids (validity + uniqueness) before any side effect:
+    # no out/ dir, no runs/, no Agent, no submission/result.
+    _validate_study_systems(systems)
     public_manifest = load_public_manifest(evaluation)
     task_pack = derive_task_pack(public_manifest, _challenges(evaluation))
 
@@ -177,14 +204,19 @@ def run_study(
     out_path.mkdir(parents=True, exist_ok=True)
 
     all_runs: list[ReplicateResult] = []
-    with tempfile.TemporaryDirectory(prefix="vica-study-") as tmp:
-        workdir = Path(tmp)
-        for spec in systems:
-            reps = 1 if spec.kind == "submission" else replicates
-            for rep in range(reps):
-                all_runs.append(
-                    _run_system_once(spec, evaluation, workdir, rep, verifier_secret)
+    for spec in systems:
+        reps = 1 if spec.kind == "submission" else replicates
+        for rep in range(reps):
+            # Persistent per-replicate directory (never deleted after the study
+            # returns, §22-25). Result paths are recorded relative to the study
+            # root so ``study.json`` stays portable (§24).
+            run_dir = out_path / "runs" / _safe_component(spec.system_id) / f"r{rep}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            all_runs.append(
+                _run_system_once(
+                    spec, evaluation, run_dir, rep, verifier_secret, out_path
                 )
+            )
 
     systems_summary = _summarize_systems(all_runs)
     # Persist an aggregate study report in the output dir.
@@ -242,6 +274,27 @@ def _summarize_systems(
     return by_system
 
 
+def _safe_component(name: str) -> str:
+    """Validate a system_id into a single safe, unambiguous path component.
+
+    The system_id is a benchmark provenance identity and is emitted into the
+    on-disk run path, so we REJECT (never silently normalize) anything that is
+    not a single ``[A-Za-z0-9._-]`` component. A lossy sanitizer would collapse
+    distinct identities (e.g. ``ab`` and ``a/b``) onto the same path and could
+    allow ``.`` / ``..``; instead we raise ``ValueError`` so a collision is
+    impossible and traversal is impossible.
+    """
+    if not isinstance(name, str) or not _SYSTEM_ID_RE.match(name):
+        raise ValueError(
+            f"invalid system_id {name!r}: must match "
+            r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ and be a single path component"
+        )
+    return name
+
+
+_SYSTEM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
 def _accumulate_metrics(bucket: dict[str, Any], run: ReplicateResult) -> None:
     metrics = run.metrics
     if metrics:
@@ -253,10 +306,19 @@ def _accumulate_metrics(bucket: dict[str, Any], run: ReplicateResult) -> None:
             bucket["failure_counts"][status] = (
                 bucket["failure_counts"].get(status, 0) + int(count)
             )
-        for diff, row in (metrics.get("by_difficulty") or {}).items():
-            d = bucket["by_difficulty"].setdefault(diff, {"valid": 0, "total": 0})
-            d["valid"] += int(row.get("valid", 0))
-            d["total"] += int(row.get("n", 0))
+        for layer_key in ("by_difficulty", "by_task_kind", "by_template"):
+            _accumulate_layer(bucket, metrics, layer_key)
+
+
+def _accumulate_layer(
+    bucket: dict[str, Any], metrics: dict[str, Any], key: str
+) -> None:
+    """Sum per-label valid/total counts from a metrics layer into the bucket."""
+    target = bucket[key]
+    for label, row in (metrics.get(key) or {}).items():
+        cell = target.setdefault(label, {"valid": 0, "total": 0})
+        cell["valid"] += int(row.get("valid", 0))
+        cell["total"] += int(row.get("n", 0))
 
 
 def _public_replicate(run: ReplicateResult) -> dict[str, Any]:
@@ -282,6 +344,8 @@ def _public_system_summary(sid: str, bucket: dict[str, Any]) -> dict[str, Any]:
         "median_latency_ms": _median(bucket["latency_ms"]),
         "failure_counts": bucket["failure_counts"],
         "by_difficulty": bucket["by_difficulty"],
+        "by_task_kind": bucket["by_task_kind"],
+        "by_template": bucket["by_template"],
     }
 
 
@@ -300,7 +364,12 @@ def _study_document(task_pack: Any, systems: dict[str, dict[str, Any]]) -> dict[
         "task_pack_version": task_pack.task_pack_version,
         "task_pack_hash": task_pack.task_pack_hash,
         "systems": {
-            sid: _public_system_summary(sid, systems[sid]) for sid in sorted(systems)
+            sid: {
+                **_public_system_summary(sid, systems[sid]),
+                # Full per-replicate provenance with portable result paths (§25).
+                "replicates": list(systems[sid]["replicates"]),
+            }
+            for sid in sorted(systems)
         },
     }
 

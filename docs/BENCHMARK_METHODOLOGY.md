@@ -21,7 +21,17 @@
 8. Historical benchmark data is not quietly re-interpreted by new logic.
 9. Changing a challenge generator's semantics requires a version bump.
 10. A benchmark result may legitimately fail to support the hypothesis.
+11. Candidate REPO verification is process-separated: the candidate subprocess
+    receives only the case inputs, while the parent evaluator owns the expected
+    values.
 ```
+
+**Verifier security boundary.** Because REPO candidate verification is
+process-separated, candidate Python frames cannot access evaluator-owned
+expected values (the historical `0.1.0` generator shared the verifier interpreter
+and allowed this — a benchmark research-integrity flaw). This is a **verifier
+correctness boundary**, *not* a hardened-host OS sandbox / chroot / container;
+the OS sandbox remains an experimental local process-isolation prototype.
 
 ## 2. Reporting dimensions
 

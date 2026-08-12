@@ -46,8 +46,9 @@ v0.1 不定义：
 ```
 
 `verifier_material_commitment`：secret-bound challenge family
-（`requires_verifier_secret = True`，当前仅 SYNTH-v0.1）携带完整的 SHA-256
-material 承诺（64 hex chars，见 §2.2bis）；普通家族（CSP / OPT）恒为 `null`。
+（`requires_verifier_secret = True`，当前为 SYNTH-v0.1 与 REPO-v0.1）携带完整的
+SHA-256 material 承诺（64 hex chars，见 §2.2bis）；普通家族（CSP / OPT）恒为
+`null`。
 
 ### 2.2 生成约束
 
@@ -580,8 +581,9 @@ secret-bound family 复现      强：相同 (type, version, seed, difficulty, v
 
 ### Task Pack（v0.4）
 
-基准实例集（benchmark instance set）的稳定、版本化身份：`task_pack_id`（如
-`repo-v0.1-core`）、`task_pack_version`（任务语义变化时递增，不改已发布 task）、
+基准实例集（benchmark instance set）的稳定、版本化身份：`task_pack_id`（动态
+REPO evaluation 为 `repo-v0.1-generated`；`-core` 保留给真正冻结的官方 pack，
+本轮未建立）、`task_pack_version`（任务语义变化时递增，不改已发布 task）、
 `task_pack_hash`（任务集定义的 canonical SHA-256）。Result Bundle 记录三者，
 strict reverify 绑定 hash，篡改结果集即使 valid/score 巧合也会被拒绝。见
 `src/vica/eval/taskpack.py`。
@@ -922,7 +924,9 @@ System / Program Repair Algorithm / Human-written Patch**。统一研究问题�
 
 ### 18.1 REPO-v0.1 Challenge
 
-新旗舰 challenge 类型 `repo-v0.1`（generator `0.1.0`）。内部用 `task_kind`
+新旗舰 challenge 类型 `repo-v0.1`（generator `0.3.0`，semantic-oracle verifier）。
+权威 expected 值来自独立纯函数 oracle（`docs/challenge-research/repo/semantic-oracle.md`），
+不再执行可恢复的 fixed 源。内部用 `task_kind`
 区分语义，首版只支持：
 
 ```text
@@ -980,6 +984,11 @@ deterministic result
 Untrusted patched code 在 `vica.sandbox` 中运行（resource limits、minimal env、
 clean cwd、bounded output）。我们直接调用 `solve` 而非 pytest，从而
 pytest-discovery / skip 类 shortcut 无法把失败伪装成成功。
+
+REPO candidate 验证为**进程分离**：candidate 子进程只接收 case 输入，父
+evaluator 持有 expected values。因此 candidate 的 Python 帧无法访问
+evaluator-frame 的 expected value。这是 **verifier 正确性边界**（benchmark
+research-integrity 修复），并非加固的 OS 沙箱 / chroot / 容器声明。
 
 ### 18.6 新 Failure Taxonomy
 
@@ -1107,11 +1116,22 @@ agent-performance calibration
 
 ```text
 Protocol stable
-REPO benchmark released
+REPO-v0.1 established（v1.0.2 semantic-oracle）
 SYNTH experimental
 OPT experimental
 OS sandbox experimental
 ```
+
+REPO-v0.1 在 v1.0.1 曾降级为 Experimental：公开 `Template.builder` 可被枚举，
+持有 public `solution.py` + template name + 已安装公开 VICA 包即可恢复精确
+reference 源（已在 `parser` 模板实证）。**v1.0.2 以 semantic-oracle verifier
+（Route A）真正消除该 lookup**——每个模板的权威 expected 值改为来自独立纯函数
+`input -> expected` oracle（公开任务规范），不再执行可恢复的 `fixed` 源；攻击者
+即使通过枚举 builder 恢复 `fixed` 也无优势。generator 升 `0.3.0`，`0.1.0`/`0.2.0`
+撤出 adversarial 用途，Task Pack 升 v3。设计见
+`docs/challenge-research/repo/semantic-oracle.md`。这是 verifier-correctness 声明
+（可审计），**不是** hardened hostile-code isolation 声明。VICA Framework 1.0.2
+保持 Stable。
 
 不得把所有模块统一标为 Stable。外部 Coding Agent 实证校准仍为
 `Not Yet Established`，Verifier 正确性不依赖 LLM Judge。

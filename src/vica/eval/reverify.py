@@ -28,7 +28,9 @@ from vica.eval.bundle import (
     load_verifier_material,
     validate_generator_version,
     validate_verifier_material,
+    withdrawn_generator_version,
 )
+from vica.eval.dispatch import expected_bundle_versions
 from vica.eval.metrics import summarize
 from vica.eval.models import EvaluationFailure, ReportStatus, ResultRecord, to_result_record
 from vica.eval.taskpack import derive_task_pack
@@ -80,6 +82,19 @@ def reverify_bundle(
             "result bundle evaluation_id does not match the evaluation bundle"
         )
 
+    # Strict bundle-version pairing (§34): the Result version must match the
+    # Evaluation version it is verified against. Evaluation v1 only pairs with
+    # Result v1 and Evaluation v2 only with Result v2; a cross-version strict
+    # reverify is refused.
+    _, expected_result = expected_bundle_versions(pub.get("bundle_format_version"))
+    if manifest.get("result_bundle_version") != expected_result:
+        raise EvaluationFailure(
+            f"strict reverify refused: result bundle version "
+            f"{manifest.get('result_bundle_version')!r} does not pair with evaluation "
+            f"bundle version {pub.get('bundle_format_version')!r}; expected result "
+            f"version {expected_result!r}"
+        )
+
     # The result manifest records the commitment directly; cross-check it
     # against the stored evaluation copy and the current evaluation.
     stored_eval = _read_json(root / "evaluation.json", root)
@@ -102,21 +117,38 @@ def reverify_bundle(
         )
     validate_generator_version(pub, str(pub.get("challenge_type")), stored_gen)
 
+    # Withdrawn historical generators (REPO-v0.1 0.1.0) load for inspection
+    # but are refused for strict reverify: their verifier semantics are not
+    # re-runnable and must never be silently reinterpreted.
+    withdrawn = withdrawn_generator_version(str(pub.get("challenge_type")), stored_gen)
+    if withdrawn is not None:
+        raise EvaluationFailure(
+            f"strict reverify refused: withdrawn historical generator {withdrawn!r} for "
+            f"{pub.get('challenge_type')!r} — v1.0.1 marks REPO generator 0.1.0 "
+            "withdrawn (expected-value verifier leak); no authoritative reverify"
+        )
+
     # Strict mode: bind the Task Pack identity (§50 / §59). The stored result
     # must cover exactly the same benchmark instance set as the evaluation
     # being used; a task_pack_hash mismatch means the tasks changed or the
-    # stored result is from a different task set.
+    # stored result is from a different task set. The version is bound too so a
+    # semantic re-labelling of a family's pack is detected even when the hash
+    # and id happen to coincide.
     task_pack = derive_task_pack(pub, load_public_challenges(evaluation))
-    stored_task_hash = manifest.get("task_pack_hash")
-    stored_task_id = manifest.get("task_pack_id")
+    stored_task_hash = _norm(manifest.get("task_pack_hash"))
+    stored_task_id = _norm(manifest.get("task_pack_id"))
+    stored_task_version = _norm(manifest.get("task_pack_version"))
     if (
         stored_task_hash != task_pack.task_pack_hash
         or stored_task_id != task_pack.task_pack_id
+        or stored_task_version != task_pack.task_pack_version
     ):
         raise EvaluationFailure(
             "strict reverify refused: task pack mismatch between evaluation and result "
-            f"bundle (evaluation {task_pack.task_pack_id}@{task_pack.task_pack_hash[:12]} "
-            f"!= stored {stored_task_id}@{(_norm(stored_task_hash) or 'none')[:12] or 'none'})"
+            f"bundle (evaluation {task_pack.task_pack_id}@v{task_pack.task_pack_version}"
+            f"@{task_pack.task_pack_hash[:12]} != stored "
+            f"{stored_task_id or 'none'}@v{stored_task_version or 'none'}"
+            f"@{(stored_task_hash or 'none')[:12] or 'none'})"
         )
 
     # Strict mode: the evaluation used for reverify must carry the same

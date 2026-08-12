@@ -1,12 +1,39 @@
-"""REPO-v0.1 generator — workspace + reference patch + hidden material.
+"""REPO-v0.1 generator — secret-bound instances + workspace + reference patch.
 
-Secret-bound like SYNTH-v0.1 (docs/SPEC.md "Verifier material"): the reference
-(fixed) source and the hidden test cases are derivable only from the verifier
-secret, never from the public ``(seed, difficulty)``. The public workspace
-(buggy source) and the public test *inputs* are the only solver-visible
-material; the expected outputs of the public tests equal the buggy output
-(a NoOp patch passes them — the honest hint), while the hidden tests are the
-discriminating negative control (a NoOp patch fails them).
+Generator semantics 0.3.0 (v1.0.2 semantic-oracle verifier):
+
+- **Instances are secret-bound.** The concrete source instance (identifiers,
+  helper-vs-inline structure, constants, data shapes, code organization) is
+  assembled from a domain-separated RNG derived from the verifier secret. The
+  public ``(seed, difficulty)`` alone selects the *template* and the public
+  test-input stream; it never determines the instance, the fixed source, or
+  the reference patch (docs/SPEC.md "Verifier material").
+- **``generate()`` is public-only.** It returns template metadata without the
+  workspace: without the verifier secret there is no way to assemble the
+  solver-visible workspace or the reference material. A solver-facing call
+  cannot retrieve an exact reference patch (must verify:
+  ``generate_with_solution(..., verifier_secret)``).
+- **The authoritative expected values come from an independent oracle.** Each
+  template exposes a pure ``input -> expected`` function of its semantics
+  (``SourceInstance.oracle``). Public/hidden classification and the hidden
+  tests are computed against the oracle, not by executing a recoverable fixed
+  source. Correctness is pinned to the public spec; an attacker recovering
+  ``fixed`` by enumerating the open-source builder gains no advantage, because
+  fixing the workspace to match the public oracle spec is the honest task.
+  The reference patch (git diff buggy -> fixed) remains a calibration/positive
+  control generated only in the authoritative path.
+- **The authoritative path is ``generate_with_solution``.** It builds the
+  instance, renders the buggy workspace, classifies public cases (inputs where
+  buggy == oracle — a NoOp patch passes them), classifies hidden cases (inputs
+  where buggy != oracle — a NoOp patch fails them), computes the reference
+  patch, and binds everything to the secret. Different seeds genuinely change
+  the solver-visible source instance, so patches generally differ across seeds,
+  not just the hidden inputs.
+- **Historical 0.1.0 / 0.2.0 are withdrawn.** 0.1.0 exposed static
+  buggy/fixed template sources and verified in a shared interpreter; 0.2.0
+  added process-separated verification but its expected values still derived
+  from a recoverable fixed source. 0.3.0 denies verification of both
+  (family-level gate).
 
 The workspace is a small, self-contained Python repo:
 
@@ -32,11 +59,22 @@ from pathlib import Path
 from typing import Any
 
 from vica.repo.patch import MAX_CHANGED_FILES, MAX_PATCH_BYTES
-from vica.repo.templates import Template, classify_hidden, classify_public, template_for
+from vica.repo.templates import (
+    SourceInstance,
+    build_source_instance,
+    classify_hidden,
+    classify_public,
+    template_for,
+)
 from vica.repo.workspace import manifest_hash, materialize_workspace, validate_manifest
 
 TYPE_NAME = "repo-v0.1"
-GENERATOR_VERSION = "0.1.0"
+# 0.3.0 = semantic-oracle verifier (v1.0.2): expected values come from an
+# independent per-template oracle, not from a recoverable fixed source.
+# Historical 0.1.0 (static templates + shared-interpreter verification) and
+# 0.2.0 (process-separated but recoverable fixed-source expected values) are
+# withdrawn and denied by the family version gate.
+GENERATOR_VERSION = "0.3.0"
 VERIFIER_SECRET_KEY = "_verifier_secret"
 MAX_DIFFICULTY = 3
 
@@ -64,7 +102,7 @@ DIFFICULTY_PRESETS: dict[int, Preset] = {
 # ------------------------------------------------------------------ RNG streams
 
 def _public_rng(seed: str, difficulty: int) -> random.Random:
-    """Deterministic PRNG for solver-visible public material (test inputs).
+    """Deterministic PRNG for solver-visible public test inputs.
 
     Keyed only by the public (seed, difficulty). It never samples the fixed
     reference, so knowing this RNG cannot recover the reference patch or the
@@ -77,18 +115,39 @@ def _secret_rng(verifier_secret: str, tag: str, seed: str, difficulty: int) -> r
     """Deterministic PRNG keyed by the verifier secret with a domain tag.
 
     ``seed = HMAC-SHA256(verifier_secret, type:version:tag:seed:difficulty)``.
-    The ``hidden`` tag domain-separates the hidden stream from any other
-    secret-bound stream. Knowing only the public (seed, difficulty) — without
-    the secret — cannot reconstruct this stream.
+    The ``instance`` and ``hidden`` tags domain-separate the two streams: even
+    with the same secret, instance material and hidden-test material never
+    share an RNG stream. Knowing only the public (seed, difficulty) — without
+    the secret — cannot reconstruct either stream.
     """
     tag_bytes = f"{TYPE_NAME}:{GENERATOR_VERSION}:{tag}:{seed}:{difficulty}".encode()
     digest = hmac.new(verifier_secret.encode("utf-8"), tag_bytes, hashlib.sha256).hexdigest()
     return random.Random(digest)
 
 
+def _instance_rng(verifier_secret: str, seed: str, difficulty: int) -> random.Random:
+    """RNG for the concrete source instance (verifier-only).
+
+    The instance determines the workspace source text and the fixed reference
+    source, so this stream is what keeps the reference patch secret-bound.
+    """
+    return _secret_rng(verifier_secret, "instance", seed, difficulty)
+
+
 def _hidden_rng(verifier_secret: str, seed: str, difficulty: int) -> random.Random:
-    """RNG for hidden test cases (verifier-only)."""
+    """RNG for hidden test inputs (verifier-only).
+
+    Domain-separated from the instance stream via the ``hidden`` tag.
+    """
     return _secret_rng(verifier_secret, "hidden", seed, difficulty)
+
+
+def _instance(verifier_secret: str, seed: str, difficulty: int) -> SourceInstance:
+    """The secret-bound SourceInstance for (secret, seed, difficulty)."""
+    return build_source_instance(
+        template_for(seed),
+        _instance_rng(verifier_secret, seed, difficulty),
+    )
 
 
 # ------------------------------------------------------------------ workspace
@@ -97,10 +156,10 @@ def _render_literal(value: Any) -> str:
     return repr(value)
 
 
-def _public_test_file(template: Template, public_cases: list[dict[str, Any]]) -> str:
+def _public_test_file(instance: SourceInstance, public_cases: list[dict[str, Any]]) -> str:
     """Render the solver-visible pytest file encoding the public cases."""
     lines = [
-        f'"""Public tests for the {template.name} task (REPO-v0.1)."""',
+        f'"""Public tests for the {instance.template} task (REPO-v0.1)."""',
         "from __future__ import annotations",
         "",
         "import solution",
@@ -122,23 +181,23 @@ def _public_test_file(template: Template, public_cases: list[dict[str, Any]]) ->
     return "\n".join(lines) + "\n"
 
 
-def _task_text(template: Template) -> str:
+def _task_text(instance: SourceInstance) -> str:
     return (
-        f"# {template.name}\n\n"
-        f"task_kind: {template.task_kind}\n\n"
-        f"{template.task}\n\n"
+        f"# {instance.template}\n\n"
+        f"task_kind: {instance.task_kind}\n\n"
+        f"{instance.task}\n\n"
         "Modify `solution.py` and keep the `solve` interface. Public tests are "
         "in `tests/test_public.py`. Do not modify anything under `tests/`.\n"
     )
 
 
 def _workspace_files(
-    template: Template, public_cases: list[dict[str, Any]]
+    instance: SourceInstance, public_cases: list[dict[str, Any]]
 ) -> dict[str, str]:
     return {
-        SOLUTION_PATH: template.buggy,
-        TASK_PATH: _task_text(template),
-        PUBLIC_TEST_PATH: _public_test_file(template, public_cases),
+        SOLUTION_PATH: instance.buggy,
+        TASK_PATH: _task_text(instance),
+        PUBLIC_TEST_PATH: _public_test_file(instance, public_cases),
     }
 
 
@@ -160,13 +219,15 @@ def _materialize(payload: dict[str, Any], dest: str | Path) -> Path:
 
 # ------------------------------------------------------------------ reference patch
 
-def _make_reference_patch(template: Template, payload: dict[str, Any]) -> str:
+def _make_reference_patch(instance: SourceInstance, payload: dict[str, Any]) -> str:
     """Build the git unified diff that turns the buggy workspace into the fixed one.
 
     Materializes the authoritative workspace in a temp dir, commits it, writes
     the fixed ``solution.py`` in place, and runs ``git diff``. The result is a
     patch that ``git apply`` (and therefore :func:`vica.repo.patch.apply_patch`)
-    can replay exactly. Only ``solution.py`` is touched.
+    can replay exactly. Only ``solution.py`` is touched. Computed exclusively
+    in the authoritative path (``generate_with_solution``); no public API emits
+    it.
     """
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
@@ -192,7 +253,7 @@ def _make_reference_patch(template: Template, payload: dict[str, Any]) -> str:
             check=True,
             capture_output=True,
         )
-        (ws / SOLUTION_PATH).write_text(template.fixed)
+        (ws / SOLUTION_PATH).write_text(instance.fixed)
         diff = subprocess.run(
             ["git", "-C", str(ws), "diff"], check=True, capture_output=True, text=True
         )
@@ -210,26 +271,49 @@ def _check_difficulty(difficulty: int) -> None:
 
 @lru_cache(maxsize=4096)
 def _public_payload(seed: str, difficulty: int) -> dict[str, Any]:
-    """Solver-visible payload for (seed, difficulty).
+    """Public-generation part for (seed, difficulty) — metadata only.
 
-    Contains the workspace (buggy source + public test inputs + task), the
-    structural constraints, and the public test input vectors. It never
-    contains the fixed source, the reference patch, or the hidden tests —
-    those require the verifier secret (authoritative path:
-    ``generate_with_solution`` / ``family.generate_with_solution``).
+    Contains no workspace and no reference material: without the verifier
+    secret there is no way to assemble the solver-visible workspace or the
+    expected outputs, because the concrete instance is secret-bound. The
+    authoritative payload is ``generate_with_solution``.
     """
     template = template_for(seed)
-    preset = DIFFICULTY_PRESETS[difficulty]
-    public_cases = classify_public(
-        template, _public_rng(seed, difficulty), count=preset.public_count
-    )
-    files = _workspace_files(template, public_cases)
-    manifest = _manifest_from_files(files)
     return {
         "task_kind": template.task_kind,
         "language": "python",
-        "task": _task_text(template),
         "template": template.name,
+        "public_part": True,
+    }
+
+
+@lru_cache(maxsize=4096)
+def _authoritative(
+    seed: str, difficulty: int, verifier_secret: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Authoritative assembly: full solver payload + verifier-only solution.
+
+    Deterministic for a fixed (secret, seed, difficulty); a different secret
+    yields a different instance, hence a different workspace and reference
+    patch. Used by ``generate_with_solution`` and by the family verifier's
+    hidden-test regeneration (so verification always reproduces the exact
+    material the challenge was built with).
+    """
+    preset = DIFFICULTY_PRESETS[difficulty]
+    instance = _instance(verifier_secret, seed, difficulty)
+    public_cases = classify_public(
+        instance, _public_rng(seed, difficulty), count=preset.public_count
+    )
+    hidden_cases = classify_hidden(
+        instance, _hidden_rng(verifier_secret, seed, difficulty), count=preset.hidden_count
+    )
+    files = _workspace_files(instance, public_cases)
+    manifest = _manifest_from_files(files)
+    payload = {
+        "task_kind": instance.task_kind,
+        "language": "python",
+        "task": _task_text(instance),
+        "template": instance.template,
         "constraints": {
             "allowed_paths": [SOLUTION_PATH],
             "forbidden_paths": ["private/", "tests/"],
@@ -240,36 +324,13 @@ def _public_payload(seed: str, difficulty: int) -> dict[str, Any]:
         "workspace_hash": manifest_hash(manifest),
         "workspace_manifest": manifest,
         "workspace_files": files,
-        "public_test_inputs": [{"args": list(c["args"])} for c in public_cases],
+        "public_tests": [
+            {"args": list(c["args"]), "expected": c["expected"]} for c in public_cases
+        ],
     }
-
-
-def generate(seed: str, difficulty: int) -> dict[str, Any]:
-    """Public payload for (seed, difficulty). See :func:`_public_payload`."""
-    _check_difficulty(difficulty)
-    return dict(_public_payload(seed, difficulty))
-
-
-@lru_cache(maxsize=4096)
-def _payload_with_solution(
-    seed: str, difficulty: int, verifier_secret: str
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Authoritative assembly: full solver payload + verifier-only solution."""
-    template = template_for(seed)
-    preset = DIFFICULTY_PRESETS[difficulty]
-    payload = dict(_public_payload(seed, difficulty))
-    public_cases = classify_public(
-        template, _public_rng(seed, difficulty), count=preset.public_count
-    )
-    payload["public_tests"] = [
-        {"args": list(c["args"]), "expected": c["expected"]} for c in public_cases
-    ]
-    hidden_cases = classify_hidden(
-        template, _hidden_rng(verifier_secret, seed, difficulty), count=preset.hidden_count
-    )
     solution = {
-        "reference_patch": _make_reference_patch(template, payload),
-        "fixed_source": template.fixed,
+        "reference_patch": _make_reference_patch(instance, payload),
+        "fixed_source": instance.fixed,
         "hidden_tests": [
             {"args": list(c["args"]), "expected": c["expected"]} for c in hidden_cases
         ],
@@ -277,12 +338,25 @@ def _payload_with_solution(
     return payload, solution
 
 
+def generate(seed: str, difficulty: int) -> dict[str, Any]:
+    """Public-only generation: template metadata, no workspace / no reference.
+
+    Without the verifier secret the concrete instance (and therefore the
+    workspace source, expected outputs, and the reference patch) cannot be
+    assembled. There is deliberately no secretless path that returns an exact
+    reference patch.
+    """
+    _check_difficulty(difficulty)
+    return dict(_public_payload(seed, difficulty))
+
+
 def generate_with_solution(
     seed: str, difficulty: int, verifier_secret: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Authoritative generation (see :func:`_payload_with_solution`)."""
+    """Authoritative generation (see :func:`_authoritative`)."""
     _check_difficulty(difficulty)
-    return _payload_with_solution(seed, difficulty, verifier_secret)
+    payload, solution = _authoritative(seed, difficulty, verifier_secret)
+    return dict(payload), dict(solution)
 
 
 def hidden_tests_for(
@@ -291,15 +365,12 @@ def hidden_tests_for(
     """Hidden test cases (args, expected) — for tests/calibration only.
 
     Requires the verifier *secret*; a solver holding only the public challenge
-    cannot call this to obtain hidden material.
+    cannot call this to obtain hidden material. Regenerated deterministically
+    from the same authoritative assembly the challenge was built with, so the
+    family verifier reproduces the exact hidden vectors.
     """
     _check_difficulty(difficulty)
-    template = template_for(seed)
-    preset = DIFFICULTY_PRESETS[difficulty]
-    cases = classify_hidden(
-        template, _hidden_rng(verifier_secret, seed, difficulty), count=preset.hidden_count
-    )
-    return [{"args": list(c["args"]), "expected": c["expected"]} for c in cases]
+    return [dict(c) for c in _authoritative(seed, difficulty, verifier_secret)[1]["hidden_tests"]]
 
 
 __all__ = [
