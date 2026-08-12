@@ -1,13 +1,28 @@
-"""REPO-v0.1 task templates (generator 0.2.0).
+"""REPO-v0.1 task templates (generator 0.3.0).
 
 Each template defines the *semantics* of one small Python task. A concrete
-solver-visible **source instance** — buggy (workspace) source, reference
-(fixed) source, task text, and a parameterized input sampler — is assembled by
-``build_source_instance`` from a per-instance RNG. The generator feeds it a
-verifier-secret-bound RNG, so a released challenge's reference implementation
-is only derivable by an authority holding the verifier secret.
+solver-visible **source instance** — buggy (workspace) source, the authoritative
+reference (fixed) source, an independent **semantic oracle**, task text, and a
+parameterized input sampler — is assembled by ``build_source_instance`` from a
+per-instance RNG. The generator feeds it a verifier-secret-bound RNG, so a
+released challenge's reference implementation is only derivable by an authority
+holding the verifier secret.
 
-Leakage contract (v1.0.1 research-integrity hotfix):
+Semantic-oracle verifier (v1.0.2, generator 0.3.0):
+
+- The **oracle** is a pure ``input -> expected`` function of the template's
+  semantics, independent of any per-instance source string. It is the
+  authoritative source of expected values for classification (public/hidden)
+  and therefore for the verifier. It is public by design: it *is* the task
+  specification. Correctness never depends on a recoverable fixed source.
+- Because the oracle makes the correct behavior an explicit, public spec, an
+  attacker recovering ``instance.fixed`` by enumerating the open-source builder
+  gains **no advantage**: fixing the workspace to match the public oracle spec
+  is the honest task, and the reference patch is just one of many equivalent
+  correct implementations. The reference-source lookup is thus neutralized as a
+  benchmark shortcut (docs/SPEC.md "Verifier material").
+
+Leakage contract (v1.0.1 hotfix, retained):
 
 - The public ``Template`` object exposes **no** fixed/reference source.
   ``TEMPLATES[name].fixed`` no longer exists; there is no
@@ -18,7 +33,7 @@ Leakage contract (v1.0.1 research-integrity hotfix):
   ``vica.repo.generator.generate_with_solution(..., verifier_secret)``.
 - The instance RNG is domain-separated and secret-bound; reading the
   open-source builder cannot reproduce a released challenge's reference
-  material without the secret (docs/SPEC.md "Verifier material").
+  material without the secret.
 
 Instance variation (not cosmetic noise): identifiers, helper-vs-inline
 structure, constants (cache capacity, separators, state tokens), data layout,
@@ -30,11 +45,11 @@ Every template exposes exactly one entry point:
 
     solution.solve(*args) -> Any
 
-The generator classifies inputs automatically:
+The generator classifies inputs automatically against the oracle:
 
-- **public** cases are inputs on which ``buggy == fixed`` (a NoOp patch passes
+- **public** cases are inputs on which ``buggy == oracle`` (a NoOp patch passes
   public tests — the honest hint);
-- **hidden** cases are inputs on which ``buggy != fixed`` (a NoOp patch fails
+- **hidden** cases are inputs on which ``buggy != oracle`` (a NoOp patch fails
   them — the discriminating negative control).
 """
 
@@ -48,11 +63,16 @@ from typing import Any
 
 @dataclass(frozen=True)
 class SourceInstance:
-    """One concrete source instance (buggy + fixed + task + sampler).
+    """One concrete source instance (buggy + fixed + oracle + task + sampler).
 
     ``fixed`` is the authoritative reference implementation of the instance
     and must only be reached through the generator's secret-gated assembly
     path (never by solver-facing code).
+
+    ``oracle`` is the independent ``input -> expected`` function of the
+    template semantics. It is the authoritative source of expected values for
+    classification and verification; it does not depend on any per-instance
+    source string. It is public by design (it *is* the task specification).
     """
 
     template: str
@@ -60,6 +80,7 @@ class SourceInstance:
     task: str
     buggy: str
     fixed: str
+    oracle: Callable[..., Any]
     sampler: Callable[[random.Random], tuple[Any, ...]]
 
 
@@ -99,14 +120,19 @@ def _classify_set(
     *,
     want_public: bool,
 ) -> list[dict[str, Any]]:
-    """Collect *count* cases whose buggy/fixed relationship matches *want_public*.
+    """Collect *count* cases whose buggy/oracle relationship matches *want_public*.
 
-    ``want_public=True`` collects inputs on which ``buggy == fixed`` (a NoOp
+    ``want_public=True`` collects inputs on which ``buggy == oracle`` (a NoOp
     patch passes them — the honest hint). ``want_public=False`` collects inputs
-    on which ``buggy != fixed`` (a NoOp patch fails them — the discriminating
+    on which ``buggy != oracle`` (a NoOp patch fails them — the discriminating
     negative control). The two sets are drawn from the *same* RNG stream passed
     in, so callers can domain-separate public vs hidden material by supplying
     different RNGs (see :mod:`vica.repo.generator`).
+
+    The authoritative expected value comes from ``instance.oracle`` — an
+    independent, pure function of the template semantics — never from a
+    recoverable per-instance source string. This is the semantic-oracle
+    verifier: correctness is pinned to the public spec, not to ``fixed``.
     """
     collected: list[dict[str, Any]] = []
     attempts = 0
@@ -115,7 +141,7 @@ def _classify_set(
         attempts += 1
         args = instance.sampler(rng)
         try:
-            expected = _run_source(instance.fixed, args)
+            expected = instance.oracle(*args)
         except Exception:
             continue
         try:
@@ -139,7 +165,7 @@ def classify_public(
     *,
     count: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Collect inputs on which the buggy and fixed sources agree (public tests)."""
+    """Collect inputs on which the buggy source agrees with the oracle (public tests)."""
     return _classify_set(instance, rng, count or 4, want_public=True)
 
 
@@ -149,12 +175,122 @@ def classify_hidden(
     *,
     count: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Collect inputs on which the buggy and fixed sources disagree (hidden tests)."""
+    """Collect inputs on which the buggy source disagrees with the oracle (hidden tests)."""
     return _classify_set(instance, rng, count or 8, want_public=False)
 
 
 def _pick(rng: random.Random, a: str, b: str) -> str:
     return b if rng.random() < 0.5 else a
+
+
+# ------------------------------------------------------------------ semantic oracle
+#
+# Each template exposes an independent ``oracle(*args) -> expected``: a pure,
+# deterministic function of the template semantics and the instance's *public*
+# parameters (cache capacity, state tokens, separator). It never reads a
+# per-instance source string, so the authoritative expected value is pinned to
+# the spec rather than to any recoverable ``fixed`` source. It is public by
+# design — fixing the workspace to match the oracle is the honest task.
+
+
+def _oracle_parser(text: str) -> dict[str, str]:
+    """Parse ``key=value`` lines; quoted values have their quotes stripped; lines
+    without ``=`` are ignored."""
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip() or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        result[key] = value
+    return result
+
+
+def _oracle_cache(ops: list[tuple[str, Any]], capacity: int) -> list[int | None]:
+    """Simulate an LRU cache: ``get`` refreshes recency; evict the LRU key on
+    overflow."""
+    data: dict[str, int] = {}
+    order: list[str] = []
+    out: list[int | None] = []
+    for op, *args in ops:
+        if op == "put":
+            key, value = args[0], args[1]
+            if key in data:
+                data[key] = value
+                order.remove(key)
+                order.append(key)
+            else:
+                if len(data) >= capacity:
+                    del data[order.pop(0)]
+                data[key] = value
+                order.append(key)
+        elif op == "get":
+            key = args[0]
+            if key not in data:
+                out.append(None)
+            else:
+                order.remove(key)
+                order.append(key)
+                out.append(data[key])
+    return out
+
+
+def _oracle_state(events: list[str], tokens: tuple[str, str, str]) -> str:
+    """RUN stays RUN on a tick; start enters RUN; finish exits to DONE."""
+    start, tick, finish = tokens
+    state = "IDLE"
+    for ev in events:
+        if state == "IDLE" and ev == start:
+            state = "RUN"
+        elif state == "RUN" and ev == tick:
+            state = "RUN"
+        elif state == "RUN" and ev == finish:
+            state = "DONE"
+        elif state == "DONE":
+            state = "DONE"
+    return state
+
+
+def _oracle_ser(items: dict[str, int], sep: str) -> str:
+    """Encode an int dict as ``k=v{sep}k=v`` with keys sorted."""
+    return sep.join(f"{k}={v}" for k, v in sorted(items.items()))
+
+
+def _oracle_sched(tasks: list[tuple[str, int]]) -> list[str]:
+    """Return task ids in priority order (lower int = higher priority)."""
+    return [tid for tid, _ in sorted(tasks, key=lambda x: x[1])]
+
+
+def _oracle_storage(
+    ops: list[tuple[str, Any]], tokens: tuple[str, ...]
+) -> list[str | None]:
+    """Single-level transaction KV store: commit persists tx writes, rollback
+    discards them."""
+    begin, set_, commit, rollback, get_ = tokens
+    data: dict[str, str] = {}
+    tx: dict[str, str] | None = None
+    out: list[str | None] = []
+    for op, *args in ops:
+        if op == begin:
+            tx = dict(data)
+        elif op == set_:
+            if tx is not None:
+                tx[args[0]] = args[1]
+            else:
+                data[args[0]] = args[1]
+        elif op == commit:
+            if tx is not None:
+                data = dict(tx)
+                tx = None
+        elif op == rollback:
+            tx = None
+        elif op == get_:
+            src = tx if tx is not None else data
+            out.append(src.get(args[0]))
+    return out
 
 
 # ---------------------------------------------------------------------- parser
@@ -259,6 +395,7 @@ def _build_parser(rng: random.Random) -> SourceInstance:
         task=task,
         buggy=buggy,
         fixed=fixed,
+        oracle=_oracle_parser,
         sampler=_sampler_parser,
     )
 
@@ -395,6 +532,7 @@ def _build_cache(rng: random.Random) -> SourceInstance:
         task=task,
         buggy=buggy,
         fixed=fixed,
+        oracle=lambda ops: _oracle_cache(ops, capacity),
         sampler=lambda rng: _sampler_cache(rng, capacity),
     )
 
@@ -460,6 +598,7 @@ def _build_state_machine(rng: random.Random) -> SourceInstance:
         task=task,
         buggy=buggy,
         fixed=fixed,
+        oracle=lambda events: _oracle_state(events, tokens),
         sampler=lambda rng: _sampler_state(rng, tokens),
     )
 
@@ -522,6 +661,7 @@ def _build_serialization(rng: random.Random) -> SourceInstance:
         task=task,
         buggy=buggy,
         fixed=fixed,
+        oracle=lambda items: _oracle_ser(items, sep),
         sampler=_sampler_ser,
     )
 
@@ -585,6 +725,7 @@ def _build_scheduler(rng: random.Random) -> SourceInstance:
         task=task,
         buggy=buggy,
         fixed=fixed,
+        oracle=_oracle_sched,
         sampler=_sampler_sched,
     )
 
@@ -675,6 +816,7 @@ def _build_storage(rng: random.Random) -> SourceInstance:
         task=task,
         buggy=buggy,
         fixed=fixed,
+        oracle=lambda ops: _oracle_storage(ops, tokens),
         sampler=lambda rng: _sampler_storage(rng, tokens),
     )
 

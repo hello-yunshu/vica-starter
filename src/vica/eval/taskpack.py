@@ -26,12 +26,13 @@ from typing import Any
 
 from vica.protocol.serialization import stable_hash
 
-# v1.0.1 (research-integrity hotfix): the REPO generator semantics changed
-# (0.1.0 -> 0.2.0, expected-value process isolation). A dynamic REPO evaluation
-# is therefore labelled ``repo-v0.1-generated`` (not ``core``) — only a truly
-# frozen official core pack may claim ``repo-v0.1-core``, and none is
-# established in this round. The ``<type>-core`` id is reserved for an actually
-# frozen core; other families keep their own baseline id.
+# v1.0.2 (semantic-oracle verifier): the REPO generator semantics changed again
+# (0.2.0 -> 0.3.0, expected values now from an independent oracle instead of a
+# recoverable fixed source). A dynamic REPO evaluation is therefore labelled
+# ``repo-v0.1-generated`` (not ``core``) — only a truly frozen official core
+# pack may claim ``repo-v0.1-core``, and none is established in this round.
+# The ``<type>-core`` id is reserved for an actually frozen core; other
+# families keep their own baseline id.
 TASK_PACK_ID_BY_TYPE: dict[str, str] = {
     "repo-v0.1": "repo-v0.1-generated",
 }
@@ -39,15 +40,17 @@ DEFAULT_TASK_PACK_ID = "benchmark-core"
 # Maturity of the Task Pack format, scoped per challenge family. Bump only on a
 # breaking change to a family's task-set identity definition (not on a new task
 # set). v1 -> v2 for REPO: the 0.1.0 -> 0.2.0 generator / verifier semantics
-# changed, so a candidate's validity may differ; packs and results built under
-# the old semantics must not be silently re-identified under the new ones.
-# Other families keep the default version. ``TASK_PACK_VERSION`` is retained as
-# the REPO-family pack version constant (used by tests and the family map).
+# changed. v2 -> v3: the 0.2.0 -> 0.3.0 semantic-oracle change alters the
+# authoritative expected-value derivation, so a candidate's validity may
+# differ; packs and results built under the old semantics must not be silently
+# re-identified under the new ones. Other families keep the default version.
+# ``TASK_PACK_VERSION`` is retained as the REPO-family pack version constant
+# (used by tests and the family map).
 TASK_PACK_VERSION_BY_TYPE: dict[str, str] = {
-    "repo-v0.1": "2",
+    "repo-v0.1": "3",
 }
 DEFAULT_TASK_PACK_VERSION = "1"
-TASK_PACK_VERSION = "2"
+TASK_PACK_VERSION = "3"
 
 
 @dataclass(frozen=True)

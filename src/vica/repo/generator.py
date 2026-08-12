@@ -1,6 +1,6 @@
 """REPO-v0.1 generator — secret-bound instances + workspace + reference patch.
 
-Generator semantics 0.2.0 (v1.0.1 research-integrity hotfix):
+Generator semantics 0.3.0 (v1.0.2 semantic-oracle verifier):
 
 - **Instances are secret-bound.** The concrete source instance (identifiers,
   helper-vs-inline structure, constants, data shapes, code organization) is
@@ -13,16 +13,27 @@ Generator semantics 0.2.0 (v1.0.1 research-integrity hotfix):
   solver-visible workspace or the reference material. A solver-facing call
   cannot retrieve an exact reference patch (must verify:
   ``generate_with_solution(..., verifier_secret)``).
+- **The authoritative expected values come from an independent oracle.** Each
+  template exposes a pure ``input -> expected`` function of its semantics
+  (``SourceInstance.oracle``). Public/hidden classification and the hidden
+  tests are computed against the oracle, not by executing a recoverable fixed
+  source. Correctness is pinned to the public spec; an attacker recovering
+  ``fixed`` by enumerating the open-source builder gains no advantage, because
+  fixing the workspace to match the public oracle spec is the honest task.
+  The reference patch (git diff buggy -> fixed) remains a calibration/positive
+  control generated only in the authoritative path.
 - **The authoritative path is ``generate_with_solution``.** It builds the
   instance, renders the buggy workspace, classifies public cases (inputs where
-  buggy == fixed — a NoOp patch passes them), classifies hidden cases (inputs
-  where buggy != fixed — a NoOp patch fails them), computes the reference
-  patch (git diff buggy -> fixed), and binds everything to the secret.
-  Different seeds genuinely change the solver-visible source instance, so
-  patches generally differ across seeds, not just the hidden inputs.
-- **Historical 0.1.0 is withdrawn.** The old generator exposed static
+  buggy == oracle — a NoOp patch passes them), classifies hidden cases (inputs
+  where buggy != oracle — a NoOp patch fails them), computes the reference
+  patch, and binds everything to the secret. Different seeds genuinely change
+  the solver-visible source instance, so patches generally differ across seeds,
+  not just the hidden inputs.
+- **Historical 0.1.0 / 0.2.0 are withdrawn.** 0.1.0 exposed static
   buggy/fixed template sources and verified in a shared interpreter; 0.2.0
-  denies verification of 0.1.0 challenges (family-level gate).
+  added process-separated verification but its expected values still derived
+  from a recoverable fixed source. 0.3.0 denies verification of both
+  (family-level gate).
 
 The workspace is a small, self-contained Python repo:
 
@@ -58,10 +69,12 @@ from vica.repo.templates import (
 from vica.repo.workspace import manifest_hash, materialize_workspace, validate_manifest
 
 TYPE_NAME = "repo-v0.1"
-# 0.2.0 = instance-based, secret-bound generator semantics (v1.0.1 hotfix).
-# Historical 0.1.0 (static templates + shared-interpreter verification) is
+# 0.3.0 = semantic-oracle verifier (v1.0.2): expected values come from an
+# independent per-template oracle, not from a recoverable fixed source.
+# Historical 0.1.0 (static templates + shared-interpreter verification) and
+# 0.2.0 (process-separated but recoverable fixed-source expected values) are
 # withdrawn and denied by the family version gate.
-GENERATOR_VERSION = "0.2.0"
+GENERATOR_VERSION = "0.3.0"
 VERIFIER_SECRET_KEY = "_verifier_secret"
 MAX_DIFFICULTY = 3
 

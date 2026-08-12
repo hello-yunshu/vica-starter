@@ -1,16 +1,24 @@
-"""v1.0.1 REPO research-integrity tests (P0).
+"""v1.0.1/v1.0.2 REPO research-integrity tests (P0 + semantic oracle).
 
-Covers the two P0 fixes plus generator semantics (§48-49 of the hotfix):
+Covers the P0 fixes plus generator semantics (§48-49 of the hotfix) and the
+v1.0.2 semantic-oracle verifier:
 
 - process-separated candidate verification: frame inspection / monkeypatch /
   module probing cannot reach expected values; hidden expected and the
   verifier secret never reach the candidate process;
 - static reference-source leakage: ``TEMPLATES[name].fixed`` no longer
   exists and no secretless public API yields a reference patch;
-- generator 0.2.0 semantics: secret-bound instances, deterministic
-  regeneration, seed-dependent source instances, wrong-secret rejection;
+- generator 0.3.0 semantics: secret-bound instances, deterministic
+  regeneration, seed-dependent source instances, wrong-secret rejection,
+  expected values from the per-template semantic oracle;
 - candidate process failure classification (crash / non-serializable output
   -> PROCESS_FAILURE, never a test comparison or INTERNAL_ERROR).
+
+Semantic-oracle coverage (`test_classification_expected_comes_from_oracle`,
+`test_oracle_matches_fixed_semantics`, `test_oracle_is_pure_function_of_input`,
+`test_former_generator_020_denied_at_family`): the authoritative expected value
+is computed by an independent ``input -> expected`` oracle, never by executing a
+recoverable fixed source — the reference-source lookup is closed.
 """
 
 from __future__ import annotations
@@ -372,7 +380,7 @@ def test_wrong_secret_refused_by_commitment(tmp_path) -> None:
 
 
 def test_generator_version_bumped() -> None:
-    assert GENERATOR_VERSION == "0.2.0"
+    assert GENERATOR_VERSION == "0.3.0"
 
 
 def test_same_inputs_same_secret_deterministic() -> None:
@@ -406,6 +414,67 @@ def test_reference_patch_always_applies_and_matches_fixed() -> None:
             assert (ws / "solution.py").read_text() == sol["fixed_source"]
 
 
+def test_classification_expected_comes_from_oracle() -> None:
+    """The authoritative expected value for public/hidden cases is computed by
+    the per-template semantic oracle, not by executing ``instance.fixed``.
+    This is the semantic-oracle verifier: correctness is pinned to the public
+    spec rather than to a recoverable fixed source."""
+    import random
+
+    from vica.repo.templates import (
+        TEMPLATES,
+        build_source_instance,
+        classify_hidden,
+        classify_public,
+    )
+
+    for name in TEMPLATES:
+        inst = build_source_instance(TEMPLATES[name], random.Random(f"oracle-{name}"))
+        for case in classify_public(inst, random.Random(f"pub-{name}"), count=4):
+            assert inst.oracle(*case["args"]) == case["expected"]
+        for case in classify_hidden(inst, random.Random(f"hid-{name}"), count=4):
+            assert inst.oracle(*case["args"]) == case["expected"]
+
+
+def test_oracle_matches_fixed_semantics() -> None:
+    """The oracle agrees with the authoritative reference source on arbitrary
+    sampled inputs, so the reference patch (derived from ``fixed``) is
+    consistent with the public oracle spec."""
+    import random
+
+    from vica.repo.templates import (
+        TEMPLATES,
+        build_source_instance,
+        run_source,
+    )
+
+    for name in TEMPLATES:
+        inst = build_source_instance(TEMPLATES[name], random.Random(f"agree-{name}"))
+        for i in range(25):
+            args = inst.sampler(random.Random(f"sample-{name}-{i}"))
+            assert run_source(inst.fixed, args) == inst.oracle(*args)
+
+
+def test_oracle_is_pure_function_of_input() -> None:
+    """The oracle is a deterministic, pure function of the input plus the
+    template's public parameters — it does not depend on the per-instance
+    source string or identifiers."""
+    import random
+
+    from vica.repo.templates import TEMPLATES, build_source_instance
+
+    def _behavior(name: str) -> tuple[tuple, object]:
+        inst = build_source_instance(TEMPLATES[name], random.Random(f"pure-{name}"))
+        args = inst.sampler(random.Random(f"fixed-input-{name}"))
+        return args, inst.oracle(*args)
+
+    for name in TEMPLATES:
+        args_a, out_a = _behavior(name)
+        args_b, out_b = _behavior(name)
+        assert args_a == args_b
+        assert out_a == out_b
+
+
 def test_public_bundle_contains_no_reference_material(tmp_path) -> None:
     eval_dir = tmp_path / "eval"
     prepare_evaluation(
@@ -434,6 +503,17 @@ def test_historical_generator_denied_at_family() -> None:
     payload, _ = generate_with_solution("seed-h", 1, _SECRET)
     ch = _challenge_dict(payload, "seed-h", 1, _SECRET)
     ch["generator_version"] = "0.1.0"
+    result = FAMILY.evaluate(ch, {"patch": ""})
+    assert not result.valid
+    assert result.error_code == ErrorCode.WITHDRAWN_GENERATOR
+
+
+def test_former_generator_020_denied_at_family() -> None:
+    """A challenge claiming the superseded 0.2.0 generator (recoverable
+    fixed-source expected values) is refused under 0.3.0 semantics."""
+    payload, _ = generate_with_solution("seed-h2", 1, _SECRET)
+    ch = _challenge_dict(payload, "seed-h2", 1, _SECRET)
+    ch["generator_version"] = "0.2.0"
     result = FAMILY.evaluate(ch, {"patch": ""})
     assert not result.valid
     assert result.error_code == ErrorCode.WITHDRAWN_GENERATOR
