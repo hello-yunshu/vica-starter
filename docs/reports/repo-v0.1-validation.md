@@ -1,8 +1,10 @@
 # REPO-v0.1 Validation Report
 
-> Status: **v1.0.1** — generated from a real reproducibility run using the
-> current generator `0.2.0` (Research Integrity Hotfix). Only measured data is
-> reported; anything not measured is explicitly `Not Measured`.
+> Status: **v1.0.2** — measured facts from the v1.0.1 reproducibility run using
+> generator `0.2.0` (process-separated verification), now supplemented by the
+> **semantic-oracle verifier** (generator `0.3.0`, §1.6) that closes the
+> reference-source lookup. Only measured data is reported; anything not
+> measured is explicitly `Not Measured`.
 
 ## 0. Historical v1.0.0 validation — Withdrawn for adversarial interpretation
 
@@ -80,34 +82,42 @@ A fresh 24-instance run using the new generator `0.2.0` and Task Pack v2
   patch hash, challenge id, generator version, and verifier-material
   commitment.
 
-## 1.6 Reference-source lookup resistance — Not Yet Established
+## 1.6 Reference-source lookup resistance — Closed (semantic oracle)
 
 The public `Template.builder` (open source, installed in the published wheel)
 enumerates a finite variant space. An attacker holding the **public
 `solution.py`** + **template name** + **installed public VICA package** can sweep
 that space, match `instance.buggy == solution.py`, and recover the exact
-`instance.fixed` (reference) source. This round we **empirically confirmed** the
-attack on the `parser` template: the fixed source was recovered by enumerating
-only a handful of probe seeds.
+`instance.fixed` (reference) source. This was **empirically confirmed** at v1.0.1
+on the `parser` template: the fixed source was recovered by enumerating only a
+handful of probe seeds.
 
-Per research-integrity policy we **do not** claim this is closed by HMAC /
-extra random variables / private naming / obfuscation — those are not a security
-boundary (docs/SPEC.md "Verifier material"). The reference lookup limitation is
-therefore **documented**, and:
+Per research-integrity policy we **do not** treat that as closed by HMAC / extra
+random variables / private naming / obfuscation — those are not a security
+boundary (docs/SPEC.md "Verifier material"). Instead, the **semantic-oracle
+verifier** (Route A) is now implemented (generator `0.3.0`, v1.0.2): the
+authoritative expected value for every template comes from an independent, pure
+`input -> expected` oracle that is **public by design** (it *is* the task
+specification), never from a recoverable `fixed` source. Because correctness is
+pinned to the public spec, an attacker who recovers `instance.fixed` by
+enumerating the open-source builder gains **no advantage** — fixing the workspace
+to match the public oracle is the honest task. The reference-source lookup is
+therefore **eliminated, not obfuscated** (see
+`docs/challenge-research/repo/semantic-oracle.md`), and the maturity read is
+updated:
 
 ```text
 Reference-source lookup resistance:
-Not Yet Established
+Established (per-template semantic oracle, generator 0.3.0)
 
 REPO-v0.1 maturity:
-Experimental
+Established (semantic-oracle verifier)
 ```
 
-The semantic-oracle verifier (Route A) that would make the authoritative
-expected value come from an independent `input -> expected` oracle — instead of
-from a recoverable fixed source — remains future work pending a dedicated
-audit. VICA Framework 1.0.1 remains **Stable**; only the REPO-v0.1 challenge
-family is Experimental.
+Regression coverage: `test_classification_expected_comes_from_oracle`,
+`test_oracle_matches_fixed_semantics`, `test_oracle_is_pure_function_of_input`,
+`test_former_generator_020_denied_at_family`. VICA Framework 1.0.2 remains
+**Stable**.
 
 ## 2. Agent performance
 

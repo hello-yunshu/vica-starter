@@ -4,7 +4,8 @@
 > (workspace identity, patch candidate, hidden verifier, Agent runner, NoOp /
 > Reference controls, strict reverify). Scientific difficulty calibration is
 > *structural*; agent-performance calibration is `Not Yet Established` (no real
-> coding agent was available to measure).
+> coding agent was available to measure). Exact-reference lookup is closed by
+> the **semantic-oracle verifier** (generator `0.3.0`, see `semantic-oracle.md`).
 
 ## 1. What REPO-v0.1 measures
 
@@ -76,12 +77,13 @@ pytest so pytest-discovery / skip shortcuts cannot turn a failure into a pass.
 - **Public-only probe**: a naive repair that satisfies public tests but fails
   hidden tests validates that hidden tests add discriminative power (§42).
 
-## 7. Validation summary (generator `0.2.0`)
+## 7. Validation summary (generator `0.3.0`, semantic oracle)
 
-The current validation is measured with generator `0.2.0`; the historical
-generator `0.1.0` is **withdrawn** for adversarial benchmark use (its candidate
-execution shared the verifier interpreter and allowed verifier-frame
-expected-value access — not a hardened-host escape):
+The expected values are computed by the per-template **semantic oracle**
+(`semantic-oracle.md`), so an attacker recovering `instance.fixed` by enumerating
+the open-source builder gains no advantage. The historical generators `0.1.0`
+(shared-interpreter verification) and `0.2.0` (recoverable fixed-source expected
+values) are **withdrawn** for adversarial benchmark use:
 
 | metric | value |
 |--------|-------|

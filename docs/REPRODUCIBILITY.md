@@ -56,10 +56,11 @@ A Result Bundle records `task_pack_id` / `task_pack_version` / `task_pack_hash`,
 and strict reverify binds the hash so a tampered result set is detected even
 when valid/score happen to coincide.
 
-Dynamic REPO work is generated with generator `0.2.0` and Task Pack version `2`.
-The historical REPO generator `0.1.0` is **withdrawn** for adversarial benchmark
-use (its candidate execution shared the verifier interpreter); it is **not**
-re-interpreted under `0.2.0` semantics.
+Dynamic REPO work is generated with generator `0.3.0` (semantic-oracle verifier)
+and Task Pack version `3`. The historical REPO generators `0.1.0` (candidate
+execution shared the verifier interpreter) and `0.2.0` (recoverable fixed-source
+expected values) are **withdrawn** for adversarial benchmark use; they are
+**not** re-interpreted under `0.3.0` semantics.
 
 See `src/vica/eval/taskpack.py`.
 
