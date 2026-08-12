@@ -244,6 +244,47 @@ def test_study_rejects_ambiguous_system_id(repo_eval: Path, tmp_path: Path) -> N
         )
 
 
+def test_study_rejects_duplicate_system_ids(repo_eval: Path, tmp_path: Path) -> None:
+    """system_id is unique per Study: two systems collapsing onto the same
+    ``runs/<sid>/`` path are rejected before any side effect."""
+    out = tmp_path / "study"
+    with pytest.raises(ValueError, match="duplicate Study system_id"):
+        run_study(
+            evaluation=repo_eval,
+            systems=[
+                StudySystem(system_id="dup", kind="noop"),
+                StudySystem(system_id="dup", kind="reference"),
+            ],
+            replicates=1,
+            out=out,
+            verifier_secret=_SECRET,
+        )
+    # No partial artifact: runs/dup must not exist.
+    assert not (out / "runs" / "dup").exists()
+
+
+def test_study_invalid_id_preflight_is_side_effect_free(
+    repo_eval: Path, tmp_path: Path
+) -> None:
+    """A mixed valid+invalid input is rejected as a whole: the valid system must
+    not have run and no Study artifact may be created (no partial runs/)."""
+    out = tmp_path / "study"
+    with pytest.raises(ValueError):
+        run_study(
+            evaluation=repo_eval,
+            systems=[
+                StudySystem(system_id="valid", kind="noop"),
+                StudySystem(system_id="a/b", kind="noop"),
+            ],
+            replicates=1,
+            out=out,
+            verifier_secret=_SECRET,
+        )
+    # The valid system never executed and no Study tree was created.
+    assert not (out / "runs" / "valid").exists()
+    assert not (out / "runs").exists()
+
+
 def test_study_layered_metrics_populated(repo_eval: Path, tmp_path: Path) -> None:
     """§26-27: Study summary populates by_difficulty, by_task_kind and by_template
     from the Result records — real accumulation, not empty objects."""
