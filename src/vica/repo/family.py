@@ -18,6 +18,15 @@ Key invariants:
   regenerated deterministically from the verifier secret at verification time
   (``generator.hidden_tests_for``), so they are never shipped to solvers and a
   NoOp patch fails them (§40).
+- **Candidate execution is process-separated from the expected values.**
+  The patched ``solution.py`` runs in an isolated subprocess that receives
+  ONLY the case inputs (never the expected outputs, the hidden list, or the
+  verifier secret). The subprocess returns the actual outputs; the parent
+  compares actuals against expected. Candidate Python frames therefore cannot
+  reach evaluator-owned expected values via frame inspection, and patching
+  ``builtins`` / ``json`` in the candidate cannot affect the parent's
+  comparison. This is a verifier correctness boundary, not a hardened
+  OS-level sandbox claim.
 - **Untrusted code runs in the sandbox.** The patched ``solution.py`` is loaded
   in a sandboxed subprocess (``vica.sandbox``) with resource limits, a minimal
   environment (no host secrets), a bounded output, and a clean cwd (§31). We
@@ -26,6 +35,10 @@ Key invariants:
 - **Structural violations are rejected before any execution.** Modifying a
   protected path (``tests/``, ``private/``), touching too many files, or an
   oversized patch is a STRUCTURAL_VIOLATION (§30).
+- **Withdrawn generators are refused.** A challenge produced by REPO generator
+  0.1.0 (whose verifier semantics allowed candidate-side expected-value
+  access) is refused with WITHDRAWN_GENERATOR — it is never reinterpreted
+  under 0.2.0 semantics.
 """
 
 from __future__ import annotations
@@ -68,22 +81,46 @@ REPO_SANDBOX_LIMITS = SandboxLimits(
     max_file_bytes=1024 * 1024,
 )
 
-# Reads the cases (args + expected) from stdin, runs ``solution.solve(*args)``
-# for each, and writes the per-case booleans to a file given by argv[1]. Using a
-# file (not stdout) for the result means a patched ``solve`` that happens to
-# print still cannot corrupt the outcome channel.
+# Reads ONLY the case inputs (args) from stdin, runs ``solution.solve(*args)``
+# for each, and writes the per-case ACTUAL outputs to a file given by argv[1].
+# The expected values are never sent to this process: the parent compares
+# actuals against expected. The driver loads ``solution.py`` from the explicit
+# workspace path (argv[2]) instead of ``import solution`` so it works in
+# Python isolated mode (-I) and so a patched ``solution`` that tampers with
+# ``sys.modules`` cannot rewire this loader. The driver runs in a separate
+# subprocess from the verifier, so candidate frames can never reach
+# verifier-owned expected values and candidate ``builtins``/``json`` patches
+# cannot affect the parent's comparison.
+# The subprocess protocol is: parent -> stdin (ONLY inputs) -> child runs
+# ``solution.solve`` -> child writes ACTUAL outputs -> parent compares. The
+# expected values are never sent here. The driver captures its own ``json``
+# references BEFORE loading the untrusted ``solution`` module, so a patched
+# ``solve`` that rebinds ``json.dump``/``json.load`` cannot corrupt the
+# result channel. ``json.load`` on stdin also happens before the module load.
 _DRIVER = (
-    "import json, sys\n"
-    "import solution\n"
-    "cases = json.load(sys.stdin)\n"
-    "out = []\n"
+    "import importlib.util, json, sys\n"
+    "_json_load = json.load\n"
+    "_json_dumps = json.dumps\n"
+    "_json_dump = json.dump\n"
+    "spec = importlib.util.spec_from_file_location('solution', sys.argv[2])\n"
+    "module = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(module)\n"
+    "cases = _json_load(sys.stdin)['cases']\n"
+    "actuals = []\n"
     "for c in cases:\n"
     "    try:\n"
-    "        out.append(solution.solve(*c['args']) == c['expected'])\n"
+    "        value = module.solve(*c['args'])\n"
     "    except Exception:\n"
-    "        out.append(False)\n"
+    "        actuals.append({'ok': False, 'reason': 'exception'})\n"
+    "        continue\n"
+    "    try:\n"
+    "        _json_dumps(value)\n"
+    "    except Exception:\n"
+    "        actuals.append({'ok': False, 'reason': 'not_serializable'})\n"
+    "        continue\n"
+    "    actuals.append({'ok': True, 'value': value})\n"
     "with open(sys.argv[1], 'w') as f:\n"
-    "    json.dump(out, f)\n"
+    "    _json_dump(actuals, f)\n"
 )
 
 
@@ -112,6 +149,8 @@ def repo_result_metadata(
             meta["workspace_hash"] = payload["workspace_hash"]
         if isinstance(payload.get("task_kind"), str):
             meta["task_kind"] = payload["task_kind"]
+        if isinstance(payload.get("template"), str):
+            meta["template"] = payload["template"]
     if isinstance(candidate, dict) and isinstance(candidate.get("patch"), str):
         meta.update(patch_summary(candidate["patch"]))
     return meta
@@ -121,30 +160,56 @@ def _run_cases(
     workspace: str | Path,
     cases: list[dict[str, Any]],
     limits: SandboxLimits,
-) -> list[bool] | None:
+) -> tuple[list[bool] | None, list[bool]]:
     """Run every case against the patched ``solution`` in the sandbox.
 
-    Returns a list of per-case booleans, or ``None`` when the subprocess itself
-    failed (timeout, output overflow, launch failure, or unparseable result) —
-    which the caller maps to SANDBOX_ERROR, never to a test failure.
+    The candidate subprocess receives ONLY the inputs; it returns the actual
+    outputs and the parent compares them to the expected values.
+
+    Returns ``(test_ok, candidate_failed)`` where ``test_ok`` is ``None`` when
+    the subprocess itself failed (timeout, output overflow, launch failure, or
+    unparseable result) — which the caller maps to SANDBOX_ERROR, never to a
+    test failure — and otherwise a per-case boolean of ``actual == expected``.
+    ``candidate_failed`` marks cases where the candidate ``solve`` crashed or
+    produced a non-JSON-serializable result: those are candidate PROCESS
+    failures, not test comparison failures.
     """
     with tempfile.TemporaryDirectory() as tmp:
         outfile = Path(tmp) / "out.json"
         result = run_sandboxed(
-            [sys.executable, "-c", _DRIVER, str(outfile)],
-            stdin=json.dumps(cases),
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                _DRIVER,
+                str(outfile),
+                str(Path(workspace) / "solution.py"),
+            ],
+            stdin=json.dumps(
+                {"cases": [{"args": c["args"]} for c in cases]}
+            ),
             cwd=str(workspace),
             limits=limits,
         )
         if result.error_code is not None or result.returncode != 0:
-            return None
+            return None, []
         try:
             data = json.loads(outfile.read_text())
         except Exception:
-            return None
+            return None, []
         if not isinstance(data, list) or len(data) != len(cases):
-            return None
-        return [bool(x) for x in data]
+            return None, []
+        results: list[bool] = []
+        candidate_failed: list[bool] = []
+        for actual, case in zip(data, cases, strict=True):
+            if not isinstance(actual, dict) or not actual.get("ok"):
+                candidate_failed.append(True)
+                results.append(False)
+                continue
+            candidate_failed.append(False)
+            results.append(actual.get("value") == case["expected"])
+        return results, candidate_failed
 
 
 def _resolve_challenge(challenge: Any) -> tuple[dict[str, Any], str, int, str | None]:
@@ -207,6 +272,14 @@ class RepoV01:
         except (TypeError, ValueError, KeyError):
             return ErrorCode.INVALID_SCHEMA
 
+        # Historical generator semantics are withdrawn: REPO generator 0.1.0
+        # verified candidates in the verifier's own interpreter, allowing
+        # expected-value access from candidate frames. Such challenges are
+        # refused outright, never reinterpreted under 0.2.0 semantics.
+        gen_version = challenge.get("generator_version")
+        if not isinstance(gen_version, str) or gen_version != GENERATOR_VERSION:
+            return ErrorCode.WITHDRAWN_GENERATOR
+
         # Candidate must be a patch artifact.
         if not isinstance(candidate, dict) or not isinstance(candidate.get("patch"), str):
             return ErrorCode.INVALID_SCHEMA
@@ -261,9 +334,11 @@ class RepoV01:
                 except PatchError:
                     return ErrorCode.PATCH_APPLY_FAILURE
 
-                public_results = _run_cases(ws, public_tests, REPO_SANDBOX_LIMITS)
+                public_results, public_failed = _run_cases(ws, public_tests, REPO_SANDBOX_LIMITS)
                 if public_results is None:
                     return ErrorCode.SANDBOX_ERROR
+                if any(public_failed):
+                    return ErrorCode.PROCESS_FAILURE
                 if not all(public_results):
                     return ErrorCode.PUBLIC_TEST_FAILURE
 
@@ -274,9 +349,11 @@ class RepoV01:
                     hidden = hidden_tests_for(seed, difficulty, secret)
                 except (ValueError, RuntimeError):
                     return ErrorCode.INTERNAL_ERROR
-                hidden_results = _run_cases(ws, hidden, REPO_SANDBOX_LIMITS)
+                hidden_results, hidden_failed = _run_cases(ws, hidden, REPO_SANDBOX_LIMITS)
                 if hidden_results is None:
                     return ErrorCode.SANDBOX_ERROR
+                if any(hidden_failed):
+                    return ErrorCode.PROCESS_FAILURE
                 if not all(hidden_results):
                     return ErrorCode.HIDDEN_TEST_FAILURE
         except WorkspaceError:

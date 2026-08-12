@@ -76,17 +76,21 @@ pytest so pytest-discovery / skip shortcuts cannot turn a failure into a pass.
 - **Public-only probe**: a naive repair that satisfies public tests but fails
   hidden tests validates that hidden tests add discriminative power (§42).
 
-## 7. Validation summary (generator `0.1.0`, 120-instance survey)
+## 7. Validation summary (generator `0.2.0`)
+
+The current validation is measured with generator `0.2.0`; the historical
+generator `0.1.0` is **withdrawn** for adversarial benchmark use (its candidate
+execution shared the verifier interpreter and allowed verifier-frame
+expected-value access — not a hardened-host escape):
 
 | metric | value |
 |--------|-------|
 | templates | 6 |
 | task kinds | `repair` (4), `implementation` (2) |
-| instances surveyed | 120 (40 seeds × difficulties 1–3) |
-| distinct workspace hashes | 100 |
-| reference pass | 120 / 120 |
-| NoOp hidden-fail | 120 / 120 |
-| hidden case counts | d1=6, d2=10, d3=14 |
+| reference pass | 24 / 24 |
+| NoOp pass | 0 / 24 |
+| adversarial frame-stealer pass | 0 / 24 |
+| strict reverify | 24 / 24 matched |
 
 See `threat-model.md`, `shortcut-audit.md`, `task-validity.md`, and
 `difficulty-calibration.md` for the detailed analysis.
