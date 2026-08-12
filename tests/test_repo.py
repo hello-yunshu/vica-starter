@@ -23,7 +23,6 @@ from vica.eval.reverify import reverify_bundle
 from vica.eval.verify import verify_evaluation
 from vica.repo.generator import (
     TYPE_NAME,
-    generate,
     generate_with_solution,
     hidden_tests_for,
 )
@@ -156,20 +155,19 @@ def test_workspace_nested_git_rejected(tmp_path: Path) -> None:
 
 
 def test_valid_patch_applies(tmp_path: Path) -> None:
-    payload = generate("seed-1", 1)
+    payload, sol = generate_with_solution("seed-1", 1, _SECRET_A)
     dest = materialize_workspace(
         payload["workspace_manifest"],
         {k: v.encode("utf-8") for k, v in payload["workspace_files"].items()},
         tmp_path / "ws",
     )
-    _, sol = generate_with_solution("seed-1", 1, _SECRET_A)
     apply_patch(dest, sol["reference_patch"])
     applied = (dest / "solution.py").read_text()
     assert applied == sol["fixed_source"]
 
 
 def test_invalid_patch_classified_as_patch_apply_failure(tmp_path: Path) -> None:
-    payload = generate("seed-2", 1)
+    payload, _ = generate_with_solution("seed-2", 1, _SECRET_A)
     dest = materialize_workspace(
         payload["workspace_manifest"],
         {k: v.encode("utf-8") for k, v in payload["workspace_files"].items()},
@@ -188,7 +186,7 @@ def test_invalid_patch_classified_as_patch_apply_failure(tmp_path: Path) -> None
 
 
 def test_empty_patch_is_noop(tmp_path: Path) -> None:
-    payload = generate("seed-3", 1)
+    payload, _ = generate_with_solution("seed-3", 1, _SECRET_A)
     dest = materialize_workspace(
         payload["workspace_manifest"],
         {k: v.encode("utf-8") for k, v in payload["workspace_files"].items()},
