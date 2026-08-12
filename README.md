@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 **Verifiable Intelligence Compute Arena** · 可验证智能计算竞技场
 
-**VICA 1.0 — Research Benchmark Stable**
+**VICA 1.0.1 — Research Benchmark Stable**
 
 A local research arena for measuring how different compute systems — LLMs, coding
 agents, traditional algorithms, and hybrid systems — perform on automatically
@@ -35,7 +35,7 @@ Design principles:
 
 ## Current Status
 
-VICA 1.0 freezes the protocol and benchmark surface below. It is a **Local
+VICA 1.0.1 freezes the protocol and benchmark surface below. It is a **Local
 Research Arena** — no hosted service, no online leaderboard, no hardened
 arbitrary-code sandbox. See `docs/SPEC.md` "Compatibility Contract" and
 `docs/MIGRATION.md`.
@@ -97,6 +97,12 @@ arbitrary-code sandbox. See `docs/SPEC.md` "Compatibility Contract" and
   never a solver `INVALID_SOLUTION`.
 - Hidden verifier material (hidden tests, reference solution, verifier secret) is
   isolated from solver inputs. See `docs/SPEC.md` "Verifier Material".
+- REPO candidate verification is **process-separated**: the candidate subprocess
+  receives only the case inputs, and the evaluator owns the expected values, so
+  candidate Python frames cannot read expected values. This is a verifier
+  correctness boundary, not a hardened-host sandbox. REPO-v0.1 is marked Stable
+  because the P0 process-isolation / reference-leakage fixes are closed and the
+  adversarial regression suite passes (see `docs/reports/repo-v0.1-validation.md`).
 
 > Development Mode vs Evaluation Mode: a coding agent working directly in the
 > repo root can read `src/`. For a truly adversarial hidden benchmark, keep the

@@ -4,7 +4,7 @@
 
 > 先验证“可验证智能任务是否成立”，再建设平台；先有实验数据，再定义指标；先攻击 Challenge，再扩大生态。
 
-## 当前研究状态（v1.0.0 / Research Benchmark Stable）
+## 当前研究状态（v1.0.1 / Research Benchmark Stable）
 
 ### 版本定位
 
@@ -14,7 +14,15 @@ v0.2.0 = Benchmark Research & External Evaluation
 v0.3.0 = Agent Benchmark（REPO-v0.1）
 v0.4.0 = Benchmark Validation & Reproducibility
 v1.0.0 = Research Benchmark Stable（Protocol + Benchmark Framework 正式冻结）
+v1.0.1 = Research Integrity Hotfix（REPO P0 process-isolation + reference-leakage 修复）
 ```
+
+v1.0.1 应用了 REPO-v0.1 的 P0 修复：candidate 验证改为**进程分离**（candidate
+子进程只接收 case 输入，父 evaluator 持有 expected values，阻断 verifier-frame
+expected-value 访问），并移除静态 reference-source 泄漏（`TEMPLATES[name].fixed`
+不复存在，无 secret 的 public API 不再产出 reference patch）。历史 generator
+`0.1.0` 因此撤出 adversarial benchmark 用途；REPO Stable 的声明仅在 P0 关闭且
+adversarial 回归通过的前提下成立。
 
 v0.1.0 已冻结可信基础设施：deterministic verifier、challenge identity、
 verifier-material binding、canonical serialization、SQLite experiment storage、
@@ -254,7 +262,7 @@ Workspace / Patch 基准。
 
 交付：
 
-- REPO-v0.1 Challenge Family（`repo-v0.1`，generator `0.1.0`）
+- REPO-v0.1 Challenge Family（`repo-v0.1`，generator `0.2.0`）
   - Workspace（identity hash + safety）+ Patch Candidate（git unified diff）
   - 6 个 task templates：`parser` / `cache` / `state_machine` / `serialization` /
     `scheduler` / `storage`（`repair` + `implementation`）
@@ -342,9 +350,10 @@ Compatibility / Release），不新增功能。
   语义、material commitment、Result integrity、strict reverify 全部 **Stable**；
   SYNTH/OPT 科学、OS 沙箱、Docker backend、agent-performance calibration
   保持 **Experimental**。
-- **Formal REPO Task Pack** `repo-v0.1-core`：≥6 templates、≥24 可复现
-  instance、repair + implementation、difficulty 1–3；每个 released instance
-  满足 reference pass / NoOp fail / workspace hash 可复现 / reverify 一致。
+- **Formal REPO Task Pack** `repo-v0.1-generated`（`-core` 保留给真正冻结的
+  官方 pack，本轮未建立）：动态 REPO evaluation 使用该 id，Task Pack 版本
+  v2；每个 released instance 满足 reference pass / NoOp fail / workspace hash
+  可复现 / reverify 一致。
 - **Release docs**：`docs/MIGRATION.md`、`SECURITY.md`；README v1.0 状态。
 - **Packaging**：wheel + sdist 构建、fresh venv 安装 smoke（`vica version`、
   `vica --help`、最小 CSP + REPO verify/reverify）。
