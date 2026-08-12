@@ -39,6 +39,28 @@ consistency.**
   portable relative paths and full provenance.
 - **Study task/template layered metrics**: `by_task_kind` and `by_template`
   (with `by_difficulty`) are now accumulated from Result records.
+- **Family-scoped Task Pack version** (`src/vica/eval/taskpack.py`): the pack
+  version is now keyed per challenge family — only REPO-v0.1 (whose
+  generator/verifier semantics changed) is `2`; CSP/SYNTH/OPT keep the default
+  `1`. A bump no longer silently re-identifies unrelated families.
+- **Strict reverify binds `task_pack_version`** (`src/vica/eval/reverify.py`):
+  the semantic layer now also rejects a tampered pack version, so a forged
+  `task_pack_version` fails even after the bundle hash is recomputed.
+- **Strict `system_id` validation** (`src/vica/eval/study.py`): a provenance
+  `system_id` must be a single safe `[A-Za-z0-9._-]` path component; ambiguous
+  or colliding ids are rejected with `ValueError` instead of being lossily
+  normalized onto a shared on-disk run path.
+
+### Maturity (final freeze audit)
+
+- **REPO-v0.1 downgraded to Experimental.** The public `Template.builder`
+  remains enumerable, so holding the public `solution.py` + template name +
+  installed public VICA package lets an attacker recover the exact reference
+  source (empirically confirmed on `parser`). Per research-integrity policy this
+  is **not** masked by HMAC / random variables / private naming. Exact-reference
+  lookup resistance is marked **Not Yet Established** until a
+  semantic-oracle verifier (or another genuinely lookup-free design) is
+  independently audited. VICA Framework 1.0.1 itself stays **Stable**.
 
 ### Notes
 

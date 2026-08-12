@@ -76,8 +76,38 @@ A fresh 24-instance run using the new generator `0.2.0` and Task Pack v2
 
 - Result Bundle records `task_pack_id`, `task_pack_version`, `task_pack_hash`
   and an Execution Profile (environment provenance, env **names only**).
-- Strict reverify binds the Task Pack hash, workspace hash, patch hash,
-  challenge id, generator version, and verifier-material commitment.
+- Strict reverify binds the Task Pack id + version + hash, workspace hash,
+  patch hash, challenge id, generator version, and verifier-material
+  commitment.
+
+## 1.6 Reference-source lookup resistance — Not Yet Established
+
+The public `Template.builder` (open source, installed in the published wheel)
+enumerates a finite variant space. An attacker holding the **public
+`solution.py`** + **template name** + **installed public VICA package** can sweep
+that space, match `instance.buggy == solution.py`, and recover the exact
+`instance.fixed` (reference) source. This round we **empirically confirmed** the
+attack on the `parser` template: the fixed source was recovered by enumerating
+only a handful of probe seeds.
+
+Per research-integrity policy we **do not** claim this is closed by HMAC /
+extra random variables / private naming / obfuscation — those are not a security
+boundary (docs/SPEC.md "Verifier material"). The reference lookup limitation is
+therefore **documented**, and:
+
+```text
+Reference-source lookup resistance:
+Not Yet Established
+
+REPO-v0.1 maturity:
+Experimental
+```
+
+The semantic-oracle verifier (Route A) that would make the authoritative
+expected value come from an independent `input -> expected` oracle — instead of
+from a recoverable fixed source — remains future work pending a dedicated
+audit. VICA Framework 1.0.1 remains **Stable**; only the REPO-v0.1 challenge
+family is Experimental.
 
 ## 2. Agent performance
 

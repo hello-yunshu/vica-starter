@@ -51,7 +51,7 @@ VICA 是 Local Research Arena。以下组件当前已存在：
 | LLM adapter | Under Review | OpenAI 兼容 API 路径（定价可选） |
 | Evaluation Bundles | Stable | v1/v2 可移植 Evaluation / Submission / Result bundle |
 | Strict Reverify | Stable | Result Bundle 的确定性复验 |
-| REPO-v0.1 | Stable | Agent Benchmark——coding-agent workspace + patch 验证 |
+| REPO-v0.1 | Experimental | Agent Benchmark——coding-agent workspace + patch 验证 |
 | Task Pack | Stable | 基准实例集的版本化身份（`task_pack_hash`） |
 | Execution Profile | Stable | 环境 provenance（仅记录名称，绝不记录 secret value） |
 | Study | Stable | 多 run 复现 + 分层指标（`vica study run`） |
@@ -94,9 +94,11 @@ VICA 是 Local Research Arena。以下组件当前已存在：
   见 `docs/SPEC.md` "Verifier Material"。
 - REPO candidate 验证为**进程分离**：candidate 子进程只接收 case 输入，evaluator
   持有 expected values，因此 candidate 的 Python 帧无法读取 expected value。
-  这是 verifier 正确性边界，并非加固的宿主沙箱。REPO-v0.1 标为 Stable 是因为
-  P0 进程隔离 / 参考泄漏修复已关闭、且 adversarial 回归测试通过（见
-  `docs/reports/repo-v0.1-validation.md`）。
+  这是 verifier 正确性边界，并非加固的宿主沙箱。P0 进程隔离 / 参考泄漏修复已关闭、
+  且 adversarial 回归测试通过（见 `docs/reports/repo-v0.1-validation.md`）。但公开
+  `Template.builder` 仍可被枚举，**exact-reference lookup resistance 仍未建立**，
+  因此 REPO-v0.1 标为 **Experimental**，待 semantic-oracle verifier 或其他真正
+  消除 lookup 的设计被独立审计确认。
 
 > Development Mode 与 Evaluation Mode：直接在仓库根目录工作的 Coding Agent 可以读取
 > `src/`。对于真正的对抗性 hidden benchmark，请把 verifier secret / hidden tests /

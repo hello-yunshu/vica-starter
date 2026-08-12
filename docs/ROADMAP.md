@@ -21,8 +21,16 @@ v1.0.1 应用了 REPO-v0.1 的 P0 修复：candidate 验证改为**进程分离*
 子进程只接收 case 输入，父 evaluator 持有 expected values，阻断 verifier-frame
 expected-value 访问），并移除静态 reference-source 泄漏（`TEMPLATES[name].fixed`
 不复存在，无 secret 的 public API 不再产出 reference patch）。历史 generator
-`0.1.0` 因此撤出 adversarial benchmark 用途；REPO Stable 的声明仅在 P0 关闭且
-adversarial 回归通过的前提下成立。
+`0.1.0` 因此撤出 adversarial benchmark 用途。
+
+**但 v1.0.1 尚未关闭 source-level exact-reference lookup。** 公开 `Template.builder`
+仍可被枚举：攻击者持有 public `solution.py` + template name + 已安装的公开 VICA
+包，即可遍历有限 variant 空间、以 `buggy` 源做 equality match，并恢复精确 `fixed`
+(reference) 源（本轮已实证：`parser` 模板在极少量 probe seed 内即可命中）。按
+research-integrity 原则，**禁止**用 HMAC / 随机变量 / 私有命名打包 reference 来伪装
+关闭。因此本轮将 **REPO-v0.1 降为 Experimental**，VICA Framework 1.0.1 保持
+Stable；exact-reference lookup resistance 标记为 **Not Yet Established**，直到
+semantic-oracle verifier（Route A）或其他真正消除 lookup 的方案被独立审计确认。
 
 v0.1.0 已冻结可信基础设施：deterministic verifier、challenge identity、
 verifier-material binding、canonical serialization、SQLite experiment storage、
@@ -280,7 +288,7 @@ Workspace / Patch 基准。
 
 ```text
 Protocol Core / Evaluation Bundles / Reverify   Stable
-REPO-v0.1                                       Stable（Released）
+REPO-v0.1                                       Experimental（v1.0.1 降级）
 CSP-v0.1                                        Stable/Baseline
 SYNTH-v0.1 / OPT-v0.1 / OS Sandbox              Experimental
 Hosted Service / Public Arena                   Not Implemented / Out of Scope
@@ -319,7 +327,7 @@ Distributed Worker / Billing / Token / Wallet / Marketplace / WebSocket /
 
 ```text
 Protocol Core / Evaluation Bundles / Reverify       Stable
-REPO-v0.1 / Task Pack / Execution Profile / Study   Stable（v0.4）
+REPO-v0.1 / Task Pack / Execution Profile / Study   Experimental（REPO）/ Stable（其余）
 CSP-v0.1                                            Stable/Baseline
 SYNTH-v0.1 / OPT-v0.1 / OS Sandbox / Docker         Experimental
 外部 Coding Agent 实证校准                           Not Yet Established
@@ -363,7 +371,7 @@ Compatibility / Release），不新增功能。
 
 ```text
 Protocol Core / Evaluation Bundles / Reverify        Stable
-REPO-v0.1 / Task Pack / Execution Profile / Study    Stable（Released）
+REPO-v0.1 / Task Pack / Execution Profile / Study     Experimental（REPO）/ Stable（其余）
 CSP-v0.1                                             Stable/Baseline
 SYNTH-v0.1 / OPT-v0.1 / OS Sandbox / Docker          Experimental
 外部 Coding Agent 实证校准                            Not Yet Established
