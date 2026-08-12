@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 **Verifiable Intelligence Compute Arena** · 可验证智能计算竞技场
 
-**VICA 1.0.1 — Research Benchmark Stable**
+**VICA 1.0.2 — Research Benchmark Stable**
 
 A local research arena for measuring how different compute systems — LLMs, coding
 agents, traditional algorithms, and hybrid systems — perform on automatically
@@ -35,7 +35,7 @@ Design principles:
 
 ## Current Status
 
-VICA 1.0.1 freezes the protocol and benchmark surface below. It is a **Local
+VICA 1.0.2 freezes the protocol and benchmark surface below. It is a **Local
 Research Arena** — no hosted service, no online leaderboard, no hardened
 arbitrary-code sandbox. See `docs/SPEC.md` "Compatibility Contract" and
 `docs/MIGRATION.md`.
@@ -52,7 +52,7 @@ arbitrary-code sandbox. See `docs/SPEC.md` "Compatibility Contract" and
 | LLM adapter | Under Review | OpenAI-compatible API path (pricing optional) |
 | Evaluation Bundles | Stable | v1/v2 portable Evaluation / Submission / Result bundles |
 | Strict Reverify | Stable | Deterministic re-verification of a Result Bundle |
-| REPO-v0.1 | Experimental | Agent Benchmark — coding-agent workspace + patch verification |
+| REPO-v0.1 | Established | Agent Benchmark — coding-agent workspace + patch verification |
 | Task Pack | Stable | Versioned identity of a benchmark instance set (`task_pack_hash`) |
 | Execution Profile | Stable | Environment provenance (names only, never secret values) |
 | Study | Stable | Multi-run replicates + layered metrics (`vica study run`) |
@@ -102,11 +102,13 @@ arbitrary-code sandbox. See `docs/SPEC.md` "Compatibility Contract" and
   candidate Python frames cannot read expected values. This is a verifier
   correctness boundary, not a hardened-host sandbox. The P0
   process-isolation / reference-leakage fixes are closed and the adversarial
-  regression suite passes (see `docs/reports/repo-v0.1-validation.md`). However
-  the public `Template.builder` remains enumerable, so **exact-reference lookup
-  resistance is Not Yet Established** and REPO-v0.1 is marked **Experimental**
-  pending an independently audited semantic-oracle verifier or another genuinely
-  lookup-free design.
+  regression suite passes (see `docs/reports/repo-v0.1-validation.md`). The
+  previously-enumerable `Template.builder` (which let an attacker recover the
+  exact reference source) is now neutralized by the **semantic-oracle verifier**
+  (generator `0.3.0`): the authoritative expected value comes from an
+  independent, public `input -> expected` oracle, so recovering `fixed` yields no
+  advantage. REPO-v0.1 is marked **Established** (see
+  `docs/challenge-research/repo/semantic-oracle.md`).
 
 > Development Mode vs Evaluation Mode: a coding agent working directly in the
 > repo root can read `src/`. For a truly adversarial hidden benchmark, keep the
@@ -132,7 +134,7 @@ arbitrary-code sandbox. See `docs/SPEC.md` "Compatibility Contract" and
 | CSP-v0.1 | Baseline | Infrastructure validation |
 | SYNTH-v0.1 | Experimental | Program-synthesis research |
 | OPT-v0.1 | Experimental | Continuous solution quality |
-| REPO-v0.1 | Experimental | Agent Benchmark — workspace + patch verification |
+| REPO-v0.1 | Established | Agent Benchmark — workspace + patch verification |
 
 Difficulty levels are **preset parameter packs**, not claims of scientifically
 calibrated universal difficulty.

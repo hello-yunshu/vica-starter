@@ -3,6 +3,42 @@
 All notable protocol changes to VICA are recorded here. Entries are concise and
 focus on protocol-level changes, not development churn.
 
+## 1.0.2 — Semantic-Oracle Verifier (2026-08-12)
+
+**Closes the REPO-v0.1 exact-reference-source lookup via an independent
+semantic oracle (Route A).**
+
+### Added
+
+- **Semantic oracle** (`src/vica/repo/templates.py`): each REPO template now
+  exposes an independent, pure `input -> expected` oracle that is the public
+  task specification. The authoritative expected value for public/hidden
+  classification and verification is computed by the oracle, never by a
+  recoverable fixed source.
+- `SourceInstance.oracle` field; oracle bound per builder with only the
+  instance's public parameters (capacity, tokens, separator).
+- Semantic-oracle design doc: `docs/challenge-research/repo/semantic-oracle.md`.
+
+### Changed
+
+- **REPO generator `0.2.0 → 0.3.0`** (`src/vica/repo/generator.py`): expected
+  values come from the per-template oracle; the reference patch remains a
+  calibration/positive control (verifier-only).
+- **REPO verifier** (`src/vica/repo/family.py`): accepts only generator `0.3.0`;
+  0.1.0 and 0.2.0 are withdrawn (`WITHDRAWN_GENERATOR`).
+- **Task Pack `2 → 3`** (`src/vica/eval/taskpack.py`): the authoritative
+  expected-value derivation changed, so 0.2.0 packs/results are not silently
+  re-identified under 0.3.0.
+- **Reference-source lookup closed**: recovering `instance.fixed` by enumerating
+  the open-source builder yields no advantage, because correctness is pinned to
+  the public oracle spec. REPO-v0.1 maturity updated to **Established**
+  (`docs/reports/repo-v0.1-validation.md`).
+
+### Fixed
+
+- Exact-reference-source lookup no longer a benchmark shortcut (v1.0.1 flagged
+  it as `Not Yet Established`).
+
 ## 1.0.1 — Research Integrity Hotfix (2026-08-12)
 
 **Research-integrity fix for the REPO-v0.1 Agent Benchmark plus protocol

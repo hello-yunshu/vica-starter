@@ -15,6 +15,7 @@ v0.3.0 = Agent Benchmark（REPO-v0.1）
 v0.4.0 = Benchmark Validation & Reproducibility
 v1.0.0 = Research Benchmark Stable（Protocol + Benchmark Framework 正式冻结）
 v1.0.1 = Research Integrity Hotfix（REPO P0 process-isolation + reference-leakage 修复）
+v1.0.2 = Semantic-Oracle Verifier（REPO exact-reference lookup 关闭）
 ```
 
 v1.0.1 应用了 REPO-v0.1 的 P0 修复：candidate 验证改为**进程分离**（candidate
@@ -31,6 +32,16 @@ research-integrity 原则，**禁止**用 HMAC / 随机变量 / 私有命名打�
 关闭。因此本轮将 **REPO-v0.1 降为 Experimental**，VICA Framework 1.0.1 保持
 Stable；exact-reference lookup resistance 标记为 **Not Yet Established**，直到
 semantic-oracle verifier（Route A）或其他真正消除 lookup 的方案被独立审计确认。
+
+**v1.0.2 关闭 source-level exact-reference lookup（Route A）。** 每个 REPO 模板
+现在暴露一个独立、纯函数的 **semantic oracle**（`input -> expected`），作为公开的
+任务规范；分类与验证的权威 expected 值一律由 oracle 计算，**不再执行可恢复的
+`fixed` 源**。因正确性钉死在公开 spec 上，攻击者即使通过枚举 builder 恢复
+`instance.fixed` 也**无任何优势**——把 workspace 修到与公开 oracle 一致即为正当任务。
+lookup 因此被**真正消除而非伪装**。generator 升至 `0.3.0`，`0.1.0`/`0.2.0` 语义
+撤出 adversarial 用途（`WITHDRAWN_GENERATOR`），Task Pack 升至 v3。设计见
+`docs/challenge-research/repo/semantic-oracle.md`，成熟度见
+`docs/reports/repo-v0.1-validation.md` §1.6。
 
 v0.1.0 已冻结可信基础设施：deterministic verifier、challenge identity、
 verifier-material binding、canonical serialization、SQLite experiment storage、
@@ -288,7 +299,7 @@ Workspace / Patch 基准。
 
 ```text
 Protocol Core / Evaluation Bundles / Reverify   Stable
-REPO-v0.1                                       Experimental（v1.0.1 降级）
+REPO-v0.1                                       Established（v1.0.2 semantic-oracle）
 CSP-v0.1                                        Stable/Baseline
 SYNTH-v0.1 / OPT-v0.1 / OS Sandbox              Experimental
 Hosted Service / Public Arena                   Not Implemented / Out of Scope
@@ -327,7 +338,7 @@ Distributed Worker / Billing / Token / Wallet / Marketplace / WebSocket /
 
 ```text
 Protocol Core / Evaluation Bundles / Reverify       Stable
-REPO-v0.1 / Task Pack / Execution Profile / Study   Experimental（REPO）/ Stable（其余）
+REPO-v0.1 / Task Pack / Execution Profile / Study   Established（REPO）/ Stable（其余）
 CSP-v0.1                                            Stable/Baseline
 SYNTH-v0.1 / OPT-v0.1 / OS Sandbox / Docker         Experimental
 外部 Coding Agent 实证校准                           Not Yet Established
@@ -360,7 +371,7 @@ Compatibility / Release），不新增功能。
   保持 **Experimental**。
 - **Formal REPO Task Pack** `repo-v0.1-generated`（`-core` 保留给真正冻结的
   官方 pack，本轮未建立）：动态 REPO evaluation 使用该 id，Task Pack 版本
-  v2；每个 released instance 满足 reference pass / NoOp fail / workspace hash
+  v3；每个 released instance 满足 reference pass / NoOp fail / workspace hash
   可复现 / reverify 一致。
 - **Release docs**：`docs/MIGRATION.md`、`SECURITY.md`；README v1.0 状态。
 - **Packaging**：wheel + sdist 构建、fresh venv 安装 smoke（`vica version`、

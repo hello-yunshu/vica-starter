@@ -924,7 +924,9 @@ System / Program Repair Algorithm / Human-written Patch**。统一研究问题�
 
 ### 18.1 REPO-v0.1 Challenge
 
-新旗舰 challenge 类型 `repo-v0.1`（generator `0.2.0`）。内部用 `task_kind`
+新旗舰 challenge 类型 `repo-v0.1`（generator `0.3.0`，semantic-oracle verifier）。
+权威 expected 值来自独立纯函数 oracle（`docs/challenge-research/repo/semantic-oracle.md`），
+不再执行可恢复的 fixed 源。内部用 `task_kind`
 区分语义，首版只支持：
 
 ```text
@@ -1114,18 +1116,22 @@ agent-performance calibration
 
 ```text
 Protocol stable
-REPO-v0.1 experimental（v1.0.1 降级）
+REPO-v0.1 established（v1.0.2 semantic-oracle）
 SYNTH experimental
 OPT experimental
 OS sandbox experimental
 ```
 
-REPO-v0.1 在 v1.0.1 降级为 Experimental：公开 `Template.builder` 仍可被枚举，
+REPO-v0.1 在 v1.0.1 曾降级为 Experimental：公开 `Template.builder` 可被枚举，
 持有 public `solution.py` + template name + 已安装公开 VICA 包即可恢复精确
-reference 源（本轮已在 `parser` 模板实证）。exact-reference lookup resistance
-标记为 **Not Yet Established**（禁止用 HMAC / 随机变量 / 私有命名伪装关闭），
-直至 semantic-oracle verifier 或其他真正消除 lookup 的设计被独立审计确认。
-VICA Framework 1.0.1（协议表面与 Bundle 语义）保持 Stable。
+reference 源（已在 `parser` 模板实证）。**v1.0.2 以 semantic-oracle verifier
+（Route A）真正消除该 lookup**——每个模板的权威 expected 值改为来自独立纯函数
+`input -> expected` oracle（公开任务规范），不再执行可恢复的 `fixed` 源；攻击者
+即使通过枚举 builder 恢复 `fixed` 也无优势。generator 升 `0.3.0`，`0.1.0`/`0.2.0`
+撤出 adversarial 用途，Task Pack 升 v3。设计见
+`docs/challenge-research/repo/semantic-oracle.md`。这是 verifier-correctness 声明
+（可审计），**不是** hardened hostile-code isolation 声明。VICA Framework 1.0.2
+保持 Stable。
 
 不得把所有模块统一标为 Stable。外部 Coding Agent 实证校准仍为
 `Not Yet Established`，Verifier 正确性不依赖 LLM Judge。
