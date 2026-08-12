@@ -17,7 +17,10 @@ Key invariants:
 - **Hidden tests are the discriminating negative control.** They are
   regenerated deterministically from the verifier secret at verification time
   (``generator.hidden_tests_for``), so they are never shipped to solvers and a
-  NoOp patch fails them (§40).
+  NoOp patch fails them (§40). Their expected values are computed by the
+  per-template **semantic oracle** (an independent ``input -> expected``
+  function), not by a recoverable fixed source: correctness is pinned to the
+  public spec (§verifier-material).
 - **Candidate execution is process-separated from the expected values.**
   The patched ``solution.py`` runs in an isolated subprocess that receives
   ONLY the case inputs (never the expected outputs, the hidden list, or the
@@ -36,9 +39,10 @@ Key invariants:
   protected path (``tests/``, ``private/``), touching too many files, or an
   oversized patch is a STRUCTURAL_VIOLATION (§30).
 - **Withdrawn generators are refused.** A challenge produced by REPO generator
-  0.1.0 (whose verifier semantics allowed candidate-side expected-value
-  access) is refused with WITHDRAWN_GENERATOR — it is never reinterpreted
-  under 0.2.0 semantics.
+  0.1.0 (whose verifier semantics allowed candidate-side expected-value access)
+  or 0.2.0 (whose expected values derived from a recoverable fixed source) is
+  refused with WITHDRAWN_GENERATOR — it is never reinterpreted under 0.3.0
+  semantics.
 """
 
 from __future__ import annotations
@@ -274,8 +278,9 @@ class RepoV01:
 
         # Historical generator semantics are withdrawn: REPO generator 0.1.0
         # verified candidates in the verifier's own interpreter, allowing
-        # expected-value access from candidate frames. Such challenges are
-        # refused outright, never reinterpreted under 0.2.0 semantics.
+        # expected-value access from candidate frames; 0.2.0 derived expected
+        # values from a recoverable fixed source. Such challenges are refused
+        # outright, never reinterpreted under 0.3.0 semantics.
         gen_version = challenge.get("generator_version")
         if not isinstance(gen_version, str) or gen_version != GENERATOR_VERSION:
             return ErrorCode.WITHDRAWN_GENERATOR

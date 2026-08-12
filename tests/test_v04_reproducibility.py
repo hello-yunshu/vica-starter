@@ -452,15 +452,15 @@ def test_reverify_detects_tampered_task_pack(repo_eval: Path, tmp_path: Path) ->
 
 def test_task_pack_version_is_family_scoped() -> None:
     """Task Pack version is family-scoped: only REPO (whose generator/verifier
-    semantics changed) bumps to v2; CSP/SYNTH/OPT keep the default v1. A global
-    version bump must not silently re-identify unrelated families."""
+    semantics changed) bumps higher than v1; CSP/SYNTH/OPT keep the default v1. A
+    global version bump must not silently re-identify unrelated families."""
     from vica.eval.taskpack import (
         DEFAULT_TASK_PACK_VERSION,
         task_pack_version_for,
     )
 
     assert DEFAULT_TASK_PACK_VERSION == "1"
-    assert task_pack_version_for("repo-v0.1") == TASK_PACK_VERSION == "2"
+    assert task_pack_version_for("repo-v0.1") == TASK_PACK_VERSION == "3"
     assert task_pack_version_for("csp-v0.1") == "1"
     assert task_pack_version_for("synth-v0.1") == "1"
     assert task_pack_version_for("opt-v0.1") == "1"

@@ -671,11 +671,14 @@ def withdrawn_generator_version(challenge_type: str, generator_version: Any) -> 
     return generator_version if generator_version in withdrawn else None
 
 
-# Historical REPO-v0.1 generator 0.1.0: verified candidates inside the verifier
-# interpreter, so candidate frames could read expected values. Withdrawn in
-# v1.0.1; new work uses generator 0.2.0 (process-separated).
+# Historical REPO-v0.1 generators:
+# - 0.1.0: verified candidates inside the verifier interpreter, so candidate
+#   frames could read expected values. Withdrawn in v1.0.1.
+# - 0.2.0: process-separated verification, but expected values derived from a
+#   recoverable fixed source (reference-source lookup). Withdrawn in v1.0.2.
+# New work uses generator 0.3.0 (semantic-oracle verifier).
 WITHDRAWN_GENERATOR_VERSIONS: dict[str, tuple[str, ...]] = {
-    "repo-v0.1": ("0.1.0",),
+    "repo-v0.1": ("0.1.0", "0.2.0"),
 }
 
 
