@@ -39,7 +39,12 @@ from vica.challenges.registry import available_types, build_challenge, get_famil
 from vica.eval.dispatch import check_evaluation_version
 from vica.eval.models import BUNDLE_FORMAT_VERSION, BUNDLE_FORMAT_VERSION_V2, EvaluationFailure
 from vica.protocol.serialization import canonical_json_bytes, stable_hash
-from vica.repo.workspace import WorkspaceError, materialize_workspace
+from vica.repo.workspace import (
+    WorkspaceError,
+    materialize_workspace,
+    workspace_hash,
+    workspace_manifest,
+)
 from vica.verifier.material import MATERIAL_VERSION, material_id, verifier_material_commitment
 
 PUBLIC_DIR = "public"
@@ -420,6 +425,13 @@ def inspect_evaluation(evaluation: str | Path) -> dict[str, Any]:
     except EvaluationFailure as exc:
         issues.append(str(exc))
 
+    # v2 layout: the solver-visible ``workspaces/`` directory must be complete
+    # and consistent with the challenges (§28-31). Public workspaces are a
+    # *solver artifact* — never an authority for verification — but a missing,
+    # extra, or tampered workspace is still an evaluation-integrity failure.
+    if public_manifest.get("bundle_format_version") == BUNDLE_FORMAT_VERSION_V2:
+        issues.extend(_inspect_public_workspaces(public_dir, challenges))
+
     return {
         "evaluation_id": public_manifest.get("evaluation_id"),
         "bundle_format_version": public_manifest.get("bundle_format_version"),
@@ -433,6 +445,94 @@ def inspect_evaluation(evaluation: str | Path) -> dict[str, Any]:
         "ok": not issues,
         "issues": issues,
     }
+
+
+def _inspect_public_workspaces(
+    public_dir: Path, challenges: list[dict[str, Any]]
+) -> list[str]:
+    """Validate ``public/workspaces/`` for every REPO challenge (§28-31).
+
+    For each REPO challenge id the directory must exist, be a regular dir with
+    no symlink escape, hash to the challenge's declared ``workspace_hash``, and
+    match the authoritative workspace manifest. The set of workspace dirs must
+    equal the set of REPO challenge ids (missing / extra / tampered all FAIL).
+    """
+    issues: list[str] = []
+    ws_root = public_dir / PUBLIC_WORKSPACES_DIR
+
+    repo_ids: set[str] = set()
+    for ch in challenges:
+        if str(ch.get("type", "")) == "repo-v0.1":
+            cid = ch.get("id")
+            if isinstance(cid, str) and cid:
+                repo_ids.add(cid)
+
+    if not repo_ids:
+        return issues
+
+    if not ws_root.is_dir():
+        return [
+            f"v2 workspace inspect: missing {PUBLIC_WORKSPACES_DIR}/ directory "
+            "for REPO challenges"
+        ]
+
+    on_disk: set[str] = set()
+    try:
+        for child in os.listdir(ws_root):
+            if isinstance(child, str) and child:
+                on_disk.add(child)
+    except OSError as exc:
+        return [f"v2 workspace inspect: cannot list {ws_root}: {exc}"]
+
+    if on_disk != repo_ids:
+        missing = sorted(repo_ids - on_disk)
+        extra = sorted(on_disk - repo_ids)
+        msg = "v2 workspace inspect: workspace set mismatch"
+        if missing:
+            msg += f"; missing {len(missing)}"
+        if extra:
+            msg += f"; extra {len(extra)}"
+        issues.append(msg)
+
+    by_id = {str(ch.get("id", "")): ch for ch in challenges}
+    for cid in sorted(repo_ids):
+        dest = ws_root / cid
+        if not dest.is_dir():
+            issues.append(f"v2 workspace inspect: {cid} is not a directory")
+            continue
+        if dest.is_symlink():
+            issues.append(f"v2 workspace inspect: {cid} is a symlink")
+            continue
+        try:
+            resolved = dest.resolve()
+            if not resolved.is_relative_to(ws_root.resolve()):
+                issues.append(f"v2 workspace inspect: {cid} escapes workspaces/")
+                continue
+            actual_hash = workspace_hash(dest)
+        except WorkspaceError as exc:
+            issues.append(f"v2 workspace inspect: {cid}: {exc}")
+            continue
+        payload = (by_id.get(cid) or {}).get("payload") or {}
+        declared = payload.get("workspace_hash")
+        if isinstance(declared, str) and declared and actual_hash != declared:
+            issues.append(
+                f"v2 workspace inspect: {cid} workspace_hash mismatch "
+                f"(declared {declared[:12]}…, actual {actual_hash[:12]}…)"
+            )
+        # Files must match the authoritative manifest embedded in the payload.
+        manifest = payload.get("workspace_manifest")
+        if isinstance(manifest, list):
+            try:
+                actual_manifest = workspace_manifest(dest)
+            except WorkspaceError as exc:
+                issues.append(f"v2 workspace inspect: {cid}: {exc}")
+                continue
+            if actual_manifest != manifest:
+                issues.append(
+                    f"v2 workspace inspect: {cid} files do not match the "
+                    "authoritative workspace manifest"
+                )
+    return issues
 
 
 def _commitment_str(v: Any) -> str | None:
@@ -538,13 +638,48 @@ def validate_generator_version(
     manifest: dict[str, Any], challenge_type: str, generator_version: Any
 ) -> None:
     """Reject an evaluation whose generator version is not the one this build
-    supports. v0.2 uses exact-version-only (no legacy generator dispatch)."""
-    family = get_family(challenge_type)
-    if generator_version != family.generator_version:
+    supports. v0.2 uses exact-version-only (no legacy generator dispatch).
+
+    Withdrawn historical generators (REPO-v0.1 generator 0.1.0, whose verifier
+    semantics leaked expected values into the candidate process) still LOAD
+    for inspection, but authoritative verify/reverify refuse them elsewhere
+    (``withdrawn_generator_version`` + family WITHDRAWN_GENERATOR gate).
+    """
+    if not isinstance(generator_version, str) or generator_version != get_family(
+        challenge_type
+    ).generator_version:
+        if withdrawn_generator_version(challenge_type, generator_version) is not None:
+            return
+        family = get_family(challenge_type)
         raise EvaluationFailure(
             f"unsupported historical generator version {generator_version!r} for "
             f"{challenge_type!r}; supported: {family.generator_version!r}"
         )
+
+
+def withdrawn_generator_version(challenge_type: str, generator_version: Any) -> str | None:
+    """The withdrawn historical generator version for *challenge_type*, if any.
+
+    A bundle built with a withdrawn generator can still be loaded and inspected
+    (its provenance stays readable), but authoritative verification and strict
+    reverify must refuse it: the old verifier semantics are not re-runnable
+    and must never be silently reinterpreted.
+    """
+    if not isinstance(generator_version, str):
+        return None
+    withdrawn = WITHDRAWN_GENERATOR_VERSIONS.get(challenge_type, ())
+    return generator_version if generator_version in withdrawn else None
+
+
+# Historical REPO-v0.1 generators:
+# - 0.1.0: verified candidates inside the verifier interpreter, so candidate
+#   frames could read expected values. Withdrawn in v1.0.1.
+# - 0.2.0: process-separated verification, but expected values derived from a
+#   recoverable fixed source (reference-source lookup). Withdrawn in v1.0.2.
+# New work uses generator 0.3.0 (semantic-oracle verifier).
+WITHDRAWN_GENERATOR_VERSIONS: dict[str, tuple[str, ...]] = {
+    "repo-v0.1": ("0.1.0", "0.2.0"),
+}
 
 
 def _check_duplicate_ids(challenges: list[dict[str, Any]], issues: list[str] | None = None) -> None:
@@ -651,4 +786,5 @@ __all__ = [
     "prepare_evaluation",
     "validate_generator_version",
     "validate_verifier_material",
+    "withdrawn_generator_version",
 ]

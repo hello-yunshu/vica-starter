@@ -69,6 +69,11 @@ def summarize(records: list[ResultRecord]) -> dict[str, Any]:
         row["valid"] = sum(vs)
         by_difficulty[str(diff)] = row
 
+    # Per-task-kind and per-template correctness with CI (REPO family). The
+    # task_kind / template are read from each record's non-secret metadata.
+    by_task_kind = _layered(records, "task_kind")
+    by_template = _layered(records, "template")
+
     return {
         "sample_count": n,
         "correctness": correctness,
@@ -77,7 +82,25 @@ def summarize(records: list[ResultRecord]) -> dict[str, Any]:
         "cost": costs,
         "failure_taxonomy": taxonomy,
         "by_difficulty": by_difficulty,
+        "by_task_kind": by_task_kind,
+        "by_template": by_template,
     }
+
+
+def _layered(records: list[ResultRecord], key: str) -> dict[str, Any]:
+    """Aggregate correctness per ``metadata[key]`` label (e.g. task_kind)."""
+    buckets: dict[str, list[bool]] = {}
+    for r in records:
+        label = r.metadata.get(key)
+        if isinstance(label, str) and label:
+            buckets.setdefault(label, []).append(r.valid)
+    out: dict[str, Any] = {}
+    for label in sorted(buckets):
+        vs = buckets[label]
+        row = success_rate_with_ci(sum(vs), len(vs))
+        row["valid"] = sum(vs)
+        out[label] = row
+    return out
 
 
 def _mean(values: list[float]) -> float:

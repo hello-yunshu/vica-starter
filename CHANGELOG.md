@@ -3,6 +3,110 @@
 All notable protocol changes to VICA are recorded here. Entries are concise and
 focus on protocol-level changes, not development churn.
 
+## 1.0.2 — Semantic-Oracle Verifier (2026-08-12)
+
+**Closes the REPO-v0.1 exact-reference-source lookup via an independent
+semantic oracle (Route A).**
+
+### Added
+
+- **Semantic oracle** (`src/vica/repo/templates.py`): each REPO template now
+  exposes an independent, pure `input -> expected` oracle that is the public
+  task specification. The authoritative expected value for public/hidden
+  classification and verification is computed by the oracle, never by a
+  recoverable fixed source.
+- `SourceInstance.oracle` field; oracle bound per builder with only the
+  instance's public parameters (capacity, tokens, separator).
+- Semantic-oracle design doc: `docs/challenge-research/repo/semantic-oracle.md`.
+
+### Changed
+
+- **REPO generator `0.2.0 → 0.3.0`** (`src/vica/repo/generator.py`): expected
+  values come from the per-template oracle; the reference patch remains a
+  calibration/positive control (verifier-only).
+- **REPO verifier** (`src/vica/repo/family.py`): accepts only generator `0.3.0`;
+  0.1.0 and 0.2.0 are withdrawn (`WITHDRAWN_GENERATOR`).
+- **Task Pack `2 → 3`** (`src/vica/eval/taskpack.py`): the authoritative
+  expected-value derivation changed, so 0.2.0 packs/results are not silently
+  re-identified under 0.3.0.
+- **Reference-source lookup closed**: recovering `instance.fixed` by enumerating
+  the open-source builder yields no advantage, because correctness is pinned to
+  the public oracle spec. REPO-v0.1 maturity updated to **Established**
+  (`docs/reports/repo-v0.1-validation.md`).
+
+### Fixed
+
+- Exact-reference-source lookup no longer a benchmark shortcut (v1.0.1 flagged
+  it as `Not Yet Established`).
+
+## 1.0.1 — Research Integrity Hotfix (2026-08-12)
+
+**Research-integrity fix for the REPO-v0.1 Agent Benchmark plus protocol
+consistency.**
+
+### Fixed
+
+- **Process-separated REPO candidate verification** (`src/vica/repo/family.py`):
+  candidate `solve` runs in an isolated subprocess that receives only the case
+  inputs; the parent evaluator owns the expected values, so candidate frames can
+  never inspect or monkeypatch them. Closes the v1.0.0 hidden-expected
+  interpreter-leak bypass.
+- **Static reference-source leakage removed** (`src/vica/repo/templates.py`):
+  the public `fixed`/reference source is no longer reachable through a
+  secretless public API; authoritative reference material now requires the
+  verifier secret.
+- **REPO generator `0.1.0 → 0.2.0`** (`src/vica/repo/generator.py`): seed now
+  genuinely varies the solver-visible code instance (not just hidden cases),
+  and reference material is secret-bound.
+- **Historical `0.1.0` semantics withdrawn**: v1.0.0 generator/verifier
+  semantics are not silently re-interpreted under 0.2.0; historical results are
+  marked withdrawn and authoritative reverify under the old semantics is refused.
+- **Task Pack `1 → 2`** (`src/vica/eval/taskpack.py`): dynamic REPO evaluations
+  are now `repo-v0.1-generated` (the `core` id is reserved for a truly frozen
+  pack).
+- **v2 workspace integrity inspection** (`src/vica/eval/bundle.py`):
+  `vica eval inspect` validates `public/workspaces/` (existence, symlink safety,
+  hash, manifest, set consistency).
+- **Strict bundle-version pairing** (`dispatch.py`/`submission.py`/`reverify.py`):
+  Evaluation v1 ↔ Submission v1 ↔ Result v1 and v2 ↔ v2 ↔ v2 only; cross-version
+  matches are an `EvaluationFailure`.
+- **Study result persistence** (`src/vica/eval/study.py`): per-replicate
+  `submission/` and `result/` bundles persist after the study returns, with
+  portable relative paths and full provenance.
+- **Study task/template layered metrics**: `by_task_kind` and `by_template`
+  (with `by_difficulty`) are now accumulated from Result records.
+- **Family-scoped Task Pack version** (`src/vica/eval/taskpack.py`): the pack
+  version is now keyed per challenge family — only REPO-v0.1 (whose
+  generator/verifier semantics changed) is `2`; CSP/SYNTH/OPT keep the default
+  `1`. A bump no longer silently re-identifies unrelated families.
+- **Strict reverify binds `task_pack_version`** (`src/vica/eval/reverify.py`):
+  the semantic layer now also rejects a tampered pack version, so a forged
+  `task_pack_version` fails even after the bundle hash is recomputed.
+- **Strict `system_id` validation** (`src/vica/eval/study.py`): a provenance
+  `system_id` must be a single safe `[A-Za-z0-9._-]` path component; ambiguous
+  or colliding ids are rejected with `ValueError` instead of being lossily
+  normalized onto a shared on-disk run path.
+
+### Maturity (final freeze audit)
+
+- **REPO-v0.1 downgraded to Experimental.** The public `Template.builder`
+  remains enumerable, so holding the public `solution.py` + template name +
+  installed public VICA package lets an attacker recover the exact reference
+  source (empirically confirmed on `parser`). Per research-integrity policy this
+  is **not** masked by HMAC / random variables / private naming. Exact-reference
+  lookup resistance is marked **Not Yet Established** until a
+  semantic-oracle verifier (or another genuinely lookup-free design) is
+  independently audited. VICA Framework 1.0.1 itself stays **Stable**.
+
+### Notes
+
+- v1.0.0 REPO generator `0.1.0` was withdrawn for adversarial benchmark use
+  because candidate execution shared the verifier interpreter and allowed
+  verifier-frame expected-value access. This is a benchmark research-integrity
+  flaw — not a hardened-host sandbox escape claim.
+- No `v1.0.1` tag or Release is created in this round; the branch awaits
+  independent audit.
+
 ## 1.0.0 — Research Benchmark Stable (2026-08-12)
 
 **Protocol + benchmark surface frozen. Freeze / compatibility / release.**

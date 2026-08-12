@@ -26,7 +26,11 @@ from pathlib import Path
 from typing import Any
 
 from vica.eval.bundle import load_public_challenges, load_public_manifest
-from vica.eval.dispatch import check_submission_version, is_v2
+from vica.eval.dispatch import (
+    check_submission_version,
+    expected_bundle_versions,
+    is_v2,
+)
 from vica.eval.models import (
     SUBMISSION_BUNDLE_VERSION,
     SUBMISSION_BUNDLE_VERSION_V2,
@@ -165,6 +169,20 @@ def load_submission_bundle(
     expected = load_public_challenges(evaluation)
     expected_ids = {ch["id"] for ch in expected}
     evaluation_id = load_public_manifest(evaluation).get("evaluation_id")
+
+    # Strict bundle-version pairing (§33): the Submission version must match
+    # the Evaluation version it is being verified against. Evaluation v1 only
+    # pairs with Submission v1 and Evaluation v2 only with Submission v2;
+    # a cross-version match is an EvaluationFailure, never silently accepted.
+    eval_version = load_public_manifest(evaluation).get("bundle_format_version")
+    expected_sub, _ = expected_bundle_versions(eval_version)
+    if manifest.get("submission_bundle_version") != expected_sub:
+        raise EvaluationFailure(
+            f"submission bundle version {manifest.get('submission_bundle_version')!r} "
+            f"does not pair with evaluation bundle version {eval_version!r}; "
+            f"expected submission version {expected_sub!r}"
+        )
+
     if manifest.get("evaluation_id") != evaluation_id:
         raise EvaluationFailure(
             "submission evaluation_id does not match the evaluation bundle"

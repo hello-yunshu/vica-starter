@@ -4,7 +4,7 @@
 
 **Verifiable Intelligence Compute Arena** · 可验证智能计算竞技场
 
-**VICA 1.0 — Research Benchmark Stable**
+**VICA 1.0.2 — Research Benchmark Stable**
 
 一个 Local Research Arena，用于度量不同计算系统——LLM、Coding Agent、传统算法与
 混合系统——在自动生成、客观可验证任务上的表现。
@@ -33,7 +33,7 @@ VICA 研究的不只是"哪个模型聊天最好"，而是：
 
 ## 当前状态
 
-VICA 1.0 冻结了以下协议与 Benchmark 表面。它是 **Local Research Arena**——无托管
+VICA 1.0.2 冻结了以下协议与 Benchmark 表面。它是 **Local Research Arena**——无托管
 服务、无在线排行榜、无加固的任意代码沙箱。见 `docs/SPEC.md`「Compatibility Contract」
 与 `docs/MIGRATION.md`。
 
@@ -51,7 +51,7 @@ VICA 是 Local Research Arena。以下组件当前已存在：
 | LLM adapter | Under Review | OpenAI 兼容 API 路径（定价可选） |
 | Evaluation Bundles | Stable | v1/v2 可移植 Evaluation / Submission / Result bundle |
 | Strict Reverify | Stable | Result Bundle 的确定性复验 |
-| REPO-v0.1 | Stable | Agent Benchmark——coding-agent workspace + patch 验证 |
+| REPO-v0.1 | Established | Agent Benchmark——coding-agent workspace + patch 验证 |
 | Task Pack | Stable | 基准实例集的版本化身份（`task_pack_hash`） |
 | Execution Profile | Stable | 环境 provenance（仅记录名称，绝不记录 secret value） |
 | Study | Stable | 多 run 复现 + 分层指标（`vica study run`） |
@@ -92,6 +92,14 @@ VICA 是 Local Research Arena。以下组件当前已存在：
   `verifier_material_mismatch`），绝不是 Solver 的 `INVALID_SOLUTION`。
 - 隐藏验证材料（hidden tests、参考解、verifier secret）与 Solver 输入隔离。
   见 `docs/SPEC.md` "Verifier Material"。
+- REPO candidate 验证为**进程分离**：candidate 子进程只接收 case 输入，evaluator
+  持有 expected values，因此 candidate 的 Python 帧无法读取 expected value。
+  这是 verifier 正确性边界，并非加固的宿主沙箱。P0 进程隔离 / 参考泄漏修复已关闭、
+  且 adversarial 回归测试通过（见 `docs/reports/repo-v0.1-validation.md`）。此前可被
+  枚举的 `Template.builder`（能被用来恢复精确参考源）现由 **semantic-oracle
+  verifier**（generator `0.3.0`）真正消除：权威 expected 值来自独立、公开的
+  `input -> expected` oracle，恢复 `fixed` 不再有任何优势。REPO-v0.1 标为
+  **Established**（见 `docs/challenge-research/repo/semantic-oracle.md`）。
 
 > Development Mode 与 Evaluation Mode：直接在仓库根目录工作的 Coding Agent 可以读取
 > `src/`。对于真正的对抗性 hidden benchmark，请把 verifier secret / hidden tests /

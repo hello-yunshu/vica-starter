@@ -4,7 +4,8 @@
 > (workspace identity, patch candidate, hidden verifier, Agent runner, NoOp /
 > Reference controls, strict reverify). Scientific difficulty calibration is
 > *structural*; agent-performance calibration is `Not Yet Established` (no real
-> coding agent was available to measure).
+> coding agent was available to measure). Exact-reference lookup is closed by
+> the **semantic-oracle verifier** (generator `0.3.0`, see `semantic-oracle.md`).
 
 ## 1. What REPO-v0.1 measures
 
@@ -76,17 +77,22 @@ pytest so pytest-discovery / skip shortcuts cannot turn a failure into a pass.
 - **Public-only probe**: a naive repair that satisfies public tests but fails
   hidden tests validates that hidden tests add discriminative power (§42).
 
-## 7. Validation summary (generator `0.1.0`, 120-instance survey)
+## 7. Validation summary (generator `0.3.0`, semantic oracle)
+
+The expected values are computed by the per-template **semantic oracle**
+(`semantic-oracle.md`), so an attacker recovering `instance.fixed` by enumerating
+the open-source builder gains no advantage. The historical generators `0.1.0`
+(shared-interpreter verification) and `0.2.0` (recoverable fixed-source expected
+values) are **withdrawn** for adversarial benchmark use:
 
 | metric | value |
 |--------|-------|
 | templates | 6 |
 | task kinds | `repair` (4), `implementation` (2) |
-| instances surveyed | 120 (40 seeds × difficulties 1–3) |
-| distinct workspace hashes | 100 |
-| reference pass | 120 / 120 |
-| NoOp hidden-fail | 120 / 120 |
-| hidden case counts | d1=6, d2=10, d3=14 |
+| reference pass | 24 / 24 |
+| NoOp pass | 0 / 24 |
+| adversarial frame-stealer pass | 0 / 24 |
+| strict reverify | 24 / 24 matched |
 
 See `threat-model.md`, `shortcut-audit.md`, `task-validity.md`, and
 `difficulty-calibration.md` for the detailed analysis.

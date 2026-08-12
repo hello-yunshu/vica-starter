@@ -1,23 +1,56 @@
-"""REPO-v0.1 task templates.
+"""REPO-v0.1 task templates (generator 0.3.0).
 
-Each template is a small, self-contained Python *function* workspace. The
-candidate patch must fix or implement a module-level ``solve`` function. To
-keep the v0.3 runner uniform and deterministic every template exposes exactly
-one entry point:
+Each template defines the *semantics* of one small Python task. A concrete
+solver-visible **source instance** — buggy (workspace) source, the authoritative
+reference (fixed) source, an independent **semantic oracle**, task text, and a
+parameterized input sampler — is assembled by ``build_source_instance`` from a
+per-instance RNG. The generator feeds it a verifier-secret-bound RNG, so a
+released challenge's reference implementation is only derivable by an authority
+holding the verifier secret.
+
+Semantic-oracle verifier (v1.0.2, generator 0.3.0):
+
+- The **oracle** is a pure ``input -> expected`` function of the template's
+  semantics, independent of any per-instance source string. It is the
+  authoritative source of expected values for classification (public/hidden)
+  and therefore for the verifier. It is public by design: it *is* the task
+  specification. Correctness never depends on a recoverable fixed source.
+- Because the oracle makes the correct behavior an explicit, public spec, an
+  attacker recovering ``instance.fixed`` by enumerating the open-source builder
+  gains **no advantage**: fixing the workspace to match the public oracle spec
+  is the honest task, and the reference patch is just one of many equivalent
+  correct implementations. The reference-source lookup is thus neutralized as a
+  benchmark shortcut (docs/SPEC.md "Verifier material").
+
+Leakage contract (v1.0.1 hotfix, retained):
+
+- The public ``Template`` object exposes **no** fixed/reference source.
+  ``TEMPLATES[name].fixed`` no longer exists; there is no
+  ``reference_source`` / ``fixed_source`` / ``solution_source`` /
+  ``correct_source`` / ``reference_patch`` / ``answer_patch`` attribute on any
+  public object.
+- The only path to a challenge's fixed source / reference patch is
+  ``vica.repo.generator.generate_with_solution(..., verifier_secret)``.
+- The instance RNG is domain-separated and secret-bound; reading the
+  open-source builder cannot reproduce a released challenge's reference
+  material without the secret.
+
+Instance variation (not cosmetic noise): identifiers, helper-vs-inline
+structure, constants (cache capacity, separators, state tokens), data layout,
+and code organization all change with the instance RNG, so different seeds
+produce genuinely different workspace source and generally different repair
+patches — not just different hidden inputs.
+
+Every template exposes exactly one entry point:
 
     solution.solve(*args) -> Any
 
-A template provides the *buggy* (workspace) and *fixed* (reference-only)
-sources, a task description, and an input sampler used to generate public and
-hidden cases. The generator classifies inputs automatically:
+The generator classifies inputs automatically against the oracle:
 
-- **public** cases are inputs on which ``buggy == fixed`` (a NoOp patch passes
+- **public** cases are inputs on which ``buggy == oracle`` (a NoOp patch passes
   public tests — the honest hint);
-- **hidden** cases are inputs on which ``buggy != fixed`` (a NoOp patch fails
+- **hidden** cases are inputs on which ``buggy != oracle`` (a NoOp patch fails
   them — the discriminating negative control).
-
-This guarantees, for every released task: NoOp fails hidden, Reference passes
-all, and a public-only naive repair passes public but fails hidden.
 """
 
 from __future__ import annotations
@@ -29,101 +62,45 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class Template:
-    name: str
+class SourceInstance:
+    """One concrete source instance (buggy + fixed + oracle + task + sampler).
+
+    ``fixed`` is the authoritative reference implementation of the instance
+    and must only be reached through the generator's secret-gated assembly
+    path (never by solver-facing code).
+
+    ``oracle`` is the independent ``input -> expected`` function of the
+    template semantics. It is the authoritative source of expected values for
+    classification and verification; it does not depend on any per-instance
+    source string. It is public by design (it *is* the task specification).
+    """
+
+    template: str
     task_kind: str  # "repair" | "implementation"
     task: str
     buggy: str
     fixed: str
+    oracle: Callable[..., Any]
     sampler: Callable[[random.Random], tuple[Any, ...]]
-    # Optional: number of public / hidden cases to generate.
-    public_count: int = 6
-    hidden_count: int = 12
 
 
-_ARGV = "__vica_args__"
+@dataclass(frozen=True)
+class Template:
+    """Public template metadata. Intentionally carries NO fixed source."""
+
+    name: str
+    task_kind: str  # "repair" | "implementation"
+    builder: Callable[[random.Random], SourceInstance]
 
 
 def _run_source(src: str, args: tuple[Any, ...]) -> Any:
-    """Execute a template source in an isolated namespace and call ``solve``."""
+    """Execute a source string in an isolated namespace and call ``solve``."""
     ns: dict[str, Any] = {}
     exec(compile(src, "<template>", "exec"), ns)  # trusted template code
     return ns["solve"](*args)
 
 
-def _classify(
-    template: Template,
-    sampler: Callable[[random.Random], tuple[Any, ...]],
-    rng: random.Random,
-    public_count: int,
-    hidden_count: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split sampled inputs into public (buggy==fixed) and hidden (buggy!=fixed)."""
-    public = classify_public(template, rng, count=public_count)
-    hidden = classify_hidden(template, rng, count=hidden_count)
-    return public, hidden
-
-
-def _classify_set(
-    template: Template,
-    rng: random.Random,
-    count: int,
-    *,
-    want_public: bool,
-) -> list[dict[str, Any]]:
-    """Collect *count* cases whose buggy/fixed relationship matches *want_public*.
-
-    ``want_public=True`` collects inputs on which ``buggy == fixed`` (a NoOp
-    patch passes them — the honest hint). ``want_public=False`` collects inputs
-    on which ``buggy != fixed`` (a NoOp patch fails them — the discriminating
-    negative control). The two sets are drawn from the *same* RNG stream passed
-    in, so callers can domain-separate public vs hidden material by supplying
-    different RNGs (see :mod:`vica.repo.generator`).
-    """
-    collected: list[dict[str, Any]] = []
-    attempts = 0
-    max_attempts = count * 200
-    while len(collected) < count and attempts < max_attempts:
-        attempts += 1
-        args = template.sampler(rng)
-        try:
-            expected = _run_source(template.fixed, args)
-        except Exception:
-            continue
-        try:
-            buggy_out = _run_source(template.buggy, args)
-        except Exception:
-            buggy_out = _MISSING
-        if (buggy_out == expected) is want_public:
-            collected.append({"args": list(args), "expected": expected})
-    if len(collected) < count:
-        raise RuntimeError(
-            f"template {template.name}: could not classify enough "
-            f"{'public' if want_public else 'hidden'} cases "
-            f"({len(collected)}/{count})"
-        )
-    return collected
-
-
-def classify_public(
-    template: Template,
-    rng: random.Random,
-    *,
-    count: int | None = None,
-) -> list[dict[str, Any]]:
-    """Collect inputs on which the buggy and fixed sources agree (public tests)."""
-    return _classify_set(template, rng, count or template.public_count, want_public=True)
-
-
-def classify_hidden(
-    template: Template,
-    rng: random.Random,
-    *,
-    count: int | None = None,
-) -> list[dict[str, Any]]:
-    """Collect inputs on which the buggy and fixed sources disagree (hidden tests)."""
-    return _classify_set(template, rng, count or template.hidden_count, want_public=False)
-
+# ------------------------------------------------------------------ classification
 
 class _Missing:
     def __eq__(self, other: Any) -> bool:
@@ -136,36 +113,92 @@ class _Missing:
 _MISSING = _Missing()
 
 
-# ---------------------------------------------------------------------- parser
+def _classify_set(
+    instance: SourceInstance,
+    rng: random.Random,
+    count: int,
+    *,
+    want_public: bool,
+) -> list[dict[str, Any]]:
+    """Collect *count* cases whose buggy/oracle relationship matches *want_public*.
 
-_PARSER_BUGGY = '''"""Parse key=value lines into a dict (values may be quoted)."""
-from __future__ import annotations
+    ``want_public=True`` collects inputs on which ``buggy == oracle`` (a NoOp
+    patch passes them — the honest hint). ``want_public=False`` collects inputs
+    on which ``buggy != oracle`` (a NoOp patch fails them — the discriminating
+    negative control). The two sets are drawn from the *same* RNG stream passed
+    in, so callers can domain-separate public vs hidden material by supplying
+    different RNGs (see :mod:`vica.repo.generator`).
+
+    The authoritative expected value comes from ``instance.oracle`` — an
+    independent, pure function of the template semantics — never from a
+    recoverable per-instance source string. This is the semantic-oracle
+    verifier: correctness is pinned to the public spec, not to ``fixed``.
+    """
+    collected: list[dict[str, Any]] = []
+    attempts = 0
+    max_attempts = count * 200
+    while len(collected) < count and attempts < max_attempts:
+        attempts += 1
+        args = instance.sampler(rng)
+        try:
+            expected = instance.oracle(*args)
+        except Exception:
+            continue
+        try:
+            buggy_out = _run_source(instance.buggy, args)
+        except Exception:
+            buggy_out = _MISSING
+        if (buggy_out == expected) is want_public:
+            collected.append({"args": list(args), "expected": expected})
+    if len(collected) < count:
+        raise RuntimeError(
+            f"template {instance.template}: could not classify enough "
+            f"{'public' if want_public else 'hidden'} cases "
+            f"({len(collected)}/{count})"
+        )
+    return collected
 
 
-def solve(text: str) -> dict[str, str]:
-    """Parse ``key=value`` lines; quoted values keep their quotes (BUG)."""
+def classify_public(
+    instance: SourceInstance,
+    rng: random.Random,
+    *,
+    count: int | None = None,
+) -> list[dict[str, Any]]:
+    """Collect inputs on which the buggy source agrees with the oracle (public tests)."""
+    return _classify_set(instance, rng, count or 4, want_public=True)
+
+
+def classify_hidden(
+    instance: SourceInstance,
+    rng: random.Random,
+    *,
+    count: int | None = None,
+) -> list[dict[str, Any]]:
+    """Collect inputs on which the buggy source disagrees with the oracle (hidden tests)."""
+    return _classify_set(instance, rng, count or 8, want_public=False)
+
+
+def _pick(rng: random.Random, a: str, b: str) -> str:
+    return b if rng.random() < 0.5 else a
+
+
+# ------------------------------------------------------------------ semantic oracle
+#
+# Each template exposes an independent ``oracle(*args) -> expected``: a pure,
+# deterministic function of the template semantics and the instance's *public*
+# parameters (cache capacity, state tokens, separator). It never reads a
+# per-instance source string, so the authoritative expected value is pinned to
+# the spec rather than to any recoverable ``fixed`` source. It is public by
+# design — fixing the workspace to match the oracle is the honest task.
+
+
+def _oracle_parser(text: str) -> dict[str, str]:
+    """Parse ``key=value`` lines; quoted values have their quotes stripped; lines
+    without ``=`` are ignored."""
     result: dict[str, str] = {}
     for line in text.splitlines():
-        if not line.strip():
-            continue
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        result[key.strip()] = value.strip()
-    return result
-'''
-
-_PARSER_FIXED = '''"""Parse key=value lines into a dict (values may be quoted)."""
-from __future__ import annotations
-
-
-def solve(text: str) -> dict[str, str]:
-    """Parse ``key=value`` lines; quoted values have their quotes stripped."""
-    result: dict[str, str] = {}
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        if "=" not in line:
+        if not line.strip() or "=" not in line:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
@@ -174,7 +207,162 @@ def solve(text: str) -> dict[str, str]:
             value = value[1:-1]
         result[key] = value
     return result
+
+
+def _oracle_cache(ops: list[tuple[str, Any]], capacity: int) -> list[int | None]:
+    """Simulate an LRU cache: ``get`` refreshes recency; evict the LRU key on
+    overflow."""
+    data: dict[str, int] = {}
+    order: list[str] = []
+    out: list[int | None] = []
+    for op, *args in ops:
+        if op == "put":
+            key, value = args[0], args[1]
+            if key in data:
+                data[key] = value
+                order.remove(key)
+                order.append(key)
+            else:
+                if len(data) >= capacity:
+                    del data[order.pop(0)]
+                data[key] = value
+                order.append(key)
+        elif op == "get":
+            key = args[0]
+            if key not in data:
+                out.append(None)
+            else:
+                order.remove(key)
+                order.append(key)
+                out.append(data[key])
+    return out
+
+
+def _oracle_state(events: list[str], tokens: tuple[str, str, str]) -> str:
+    """RUN stays RUN on a tick; start enters RUN; finish exits to DONE."""
+    start, tick, finish = tokens
+    state = "IDLE"
+    for ev in events:
+        if state == "IDLE" and ev == start:
+            state = "RUN"
+        elif state == "RUN" and ev == tick:
+            state = "RUN"
+        elif state == "RUN" and ev == finish:
+            state = "DONE"
+        elif state == "DONE":
+            state = "DONE"
+    return state
+
+
+def _oracle_ser(items: dict[str, int], sep: str) -> str:
+    """Encode an int dict as ``k=v{sep}k=v`` with keys sorted."""
+    return sep.join(f"{k}={v}" for k, v in sorted(items.items()))
+
+
+def _oracle_sched(tasks: list[tuple[str, int]]) -> list[str]:
+    """Return task ids in priority order (lower int = higher priority)."""
+    return [tid for tid, _ in sorted(tasks, key=lambda x: x[1])]
+
+
+def _oracle_storage(
+    ops: list[tuple[str, Any]], tokens: tuple[str, ...]
+) -> list[str | None]:
+    """Single-level transaction KV store: commit persists tx writes, rollback
+    discards them."""
+    begin, set_, commit, rollback, get_ = tokens
+    data: dict[str, str] = {}
+    tx: dict[str, str] | None = None
+    out: list[str | None] = []
+    for op, *args in ops:
+        if op == begin:
+            tx = dict(data)
+        elif op == set_:
+            if tx is not None:
+                tx[args[0]] = args[1]
+            else:
+                data[args[0]] = args[1]
+        elif op == commit:
+            if tx is not None:
+                data = dict(tx)
+                tx = None
+        elif op == rollback:
+            tx = None
+        elif op == get_:
+            src = tx if tx is not None else data
+            out.append(src.get(args[0]))
+    return out
+
+
+# ---------------------------------------------------------------------- parser
+
+def _parser_sources(rng: random.Random) -> tuple[dict[str, str], bool]:
+    names = {
+        "result": _pick(rng, "result", "parsed"),
+        "line": _pick(rng, "line", "row"),
+        "key": _pick(rng, "key", "k"),
+        "value": _pick(rng, "value", "v"),
+        "split": _pick(rng, "_split", "_parse_pair"),
+    }
+    helper = rng.random() < 0.5
+    return names, helper
+
+
+def _render_parser(names: dict[str, str], helper: bool, keep_quotes: bool) -> str:
+    q = '"'
+    strip_quotes = (
+        ""
+        if keep_quotes
+        else (
+            f"        if len({names['value']}) >= 2 and "
+            f"{names['value']}.startswith({q!r}) and {names['value']}.endswith({q!r}):\n"
+            f"            {names['value']} = {names['value']}[1:-1]\n"
+        )
+    )
+    if helper:
+        helper_src = f'''
+
+
+def {names["split"]}({names["line"]}: str) -> tuple[str, str] | None:
+    """Split one key=value line; lines without '=' return None."""
+    if "=" not in {names["line"]}:
+        return None
+    key, value = {names["line"]}.split("=", 1)
+    return key.strip(), value.strip()
 '''
+        body = f"""    {names['result']}: dict[str, str] = {{}}
+    for {names['line']} in text.splitlines():
+        if not {names['line']}.strip():
+            continue
+        pair = {names['split']}({names['line']})
+        if pair is None:
+            continue
+        {names['key']}, {names['value']} = pair
+{strip_quotes}        {names['result']}[{names['key']}] = {names['value']}
+    return {names['result']}"""
+    else:
+        helper_src = ""
+        body = f"""    {names['result']}: dict[str, str] = {{}}
+    for {names['line']} in text.splitlines():
+        if not {names['line']}.strip():
+            continue
+        if "=" not in {names['line']}:
+            continue
+        {names['key']}, {names['value']} = {names['line']}.split("=", 1)
+        {names['key']} = {names['key']}.strip()
+        {names['value']} = {names['value']}.strip()
+{strip_quotes}        {names['result']}[{names['key']}] = {names['value']}
+    return {names['result']}"""
+    bug_note = "keep their quotes (BUG)" if keep_quotes else "have their quotes stripped"
+    return (
+        '"""Parse ``key=value`` lines into a dict (values may be quoted)."""\n'
+        "from __future__ import annotations\n"
+        f"{helper_src}\n"
+        "\n"
+        "\n"
+        "def solve(text: str) -> dict[str, str]:\n"
+        f'    """Parse ``key=value`` lines; quoted values {bug_note}."""\n'
+        f"{body}\n"
+    )
 
 
 def _sampler_parser(rng: random.Random) -> tuple[str, ...]:
@@ -192,105 +380,103 @@ def _sampler_parser(rng: random.Random) -> tuple[str, ...]:
     return ("\n".join(lines),)
 
 
-def _parser() -> Template:
-    return Template(
-        name="parser",
-        task_kind="repair",
-        task="Fix the parser: values wrapped in double quotes must have the "
+def _build_parser(rng: random.Random) -> SourceInstance:
+    names, helper = _parser_sources(rng)
+    buggy = _render_parser(names, helper, keep_quotes=True)
+    fixed = _render_parser(names, helper, keep_quotes=False)
+    task = (
+        "Fix the parser: values wrapped in double quotes must have the "
         "quotes stripped. Lines without ``=`` are ignored. Hidden tests cover "
-        "quoted values and multi-line input.",
-        buggy=_PARSER_BUGGY,
-        fixed=_PARSER_FIXED,
+        "quoted values and multi-line input."
+    )
+    return SourceInstance(
+        template="parser",
+        task_kind="repair",
+        task=task,
+        buggy=buggy,
+        fixed=fixed,
+        oracle=_oracle_parser,
         sampler=_sampler_parser,
     )
 
 
 # ---------------------------------------------------------------------- cache
 
-_CACHE_BUGGY = '''"""A fixed-capacity key-value cache (LRU eviction)."""
-from __future__ import annotations
+def _render_cache(
+    capacity: int,
+    class_name: str,
+    data_name: str,
+    order_name: str,
+    put_name: str,
+    get_name: str,
+    keep_bug: bool,
+) -> str:
+    if keep_bug:
+        put_update = (
+            f"            self.{data_name}[key] = value\n"
+            "            return\n"
+        )
+        get_body = (
+            "        # BUG: a read does not refresh recency.\n"
+            f"        return self.{data_name}.get(key)\n"
+        )
+    else:
+        put_update = (
+            f"            self.{data_name}[key] = value\n"
+            f"            self.{order_name}.remove(key)\n"
+            f"            self.{order_name}.append(key)\n"
+            "            return\n"
+        )
+        get_body = (
+            f"        if key not in self.{data_name}:\n"
+            "            return None\n"
+            f"        self.{order_name}.remove(key)\n"
+            f"        self.{order_name}.append(key)\n"
+            f"        return self.{data_name}[key]\n"
+        )
+    return (
+        '"""A fixed-capacity key-value cache (LRU eviction)."""\n'
+        "from __future__ import annotations\n"
+        "\n"
+        "\n"
+        f"class {class_name}:\n"
+        f"    def __init__(self, capacity: int) -> None:\n"
+        "        self.capacity = capacity\n"
+        f"        self.{data_name}: dict[str, int] = {{}}\n"
+        f"        self.{order_name}: list[str] = []\n"
+        "\n"
+        f"    def {put_name}(self, key: str, value: int) -> None:\n"
+        f"        if key in self.{data_name}:\n"
+        f"{put_update}"
+        f"        if len(self.{data_name}) >= self.capacity:\n"
+        f"            evict = self.{order_name}.pop(0)\n"
+        f"            del self.{data_name}[evict]\n"
+        f"        self.{data_name}[key] = value\n"
+        f"        self.{order_name}.append(key)\n"
+        "\n"
+        f"    def {get_name}(self, key: str) -> int | None:\n"
+        f"{get_body}\n"
+        "\n"
+        "\n"
+        "def solve(ops: list[tuple[str, Any]]) -> list[int | None]:\n"
+        '    """Run an op script; return the list of ``get`` results."""\n'
+        f"    cache = {class_name}(capacity={capacity})\n"
+        "    out: list[int | None] = []\n"
+        "    for op, *args in ops:\n"
+        f'        if op == "put":\n'
+        f"            cache.{put_name}(args[0], args[1])\n"
+        f'        elif op == "get":\n'
+        f"            out.append(cache.{get_name}(args[0]))\n"
+        "    return out\n"
+    )
 
 
-class _Cache:
-    def __init__(self, capacity: int) -> None:
-        self.capacity = capacity
-        self._data: dict[str, int] = {}
-        self._order: list[str] = []
+def _sampler_cache(rng: random.Random, capacity: int) -> tuple[list[tuple[str, Any]], ...]:
+    """Sample a cache op script for a *capacity*-sized cache.
 
-    def put(self, key: str, value: int) -> None:
-        if key in self._data:
-            self._data[key] = value
-            return
-        if len(self._data) >= self.capacity:
-            evict = self._order.pop(0)
-            del self._data[evict]
-        self._data[key] = value
-        self._order.append(key)
-
-    def get(self, key: str) -> int | None:
-        # BUG: a read does not refresh recency.
-        return self._data.get(key)
-
-
-def solve(ops: list[tuple[str, Any]]) -> list[int | None]:
-    """Run an op script; return the list of ``get`` results."""
-    cache = _Cache(capacity=2)
-    out: list[int | None] = []
-    for op, *args in ops:
-        if op == "put":
-            cache.put(args[0], args[1])
-        elif op == "get":
-            out.append(cache.get(args[0]))
-    return out
-'''
-
-_CACHE_FIXED = '''"""A fixed-capacity key-value cache (LRU eviction)."""
-from __future__ import annotations
-
-
-class _Cache:
-    def __init__(self, capacity: int) -> None:
-        self.capacity = capacity
-        self._data: dict[str, int] = {}
-        self._order: list[str] = []
-
-    def put(self, key: str, value: int) -> None:
-        if key in self._data:
-            self._data[key] = value
-            self._order.remove(key)
-            self._order.append(key)
-            return
-        if len(self._data) >= self.capacity:
-            evict = self._order.pop(0)
-            del self._data[evict]
-        self._data[key] = value
-        self._order.append(key)
-
-    def get(self, key: str) -> int | None:
-        if key not in self._data:
-            return None
-        self._order.remove(key)
-        self._order.append(key)
-        return self._data[key]
-
-
-def solve(ops: list[tuple[str, Any]]) -> list[int | None]:
-    cache = _Cache(capacity=2)
-    out: list[int | None] = []
-    for op, *args in ops:
-        if op == "put":
-            cache.put(args[0], args[1])
-        elif op == "get":
-            out.append(cache.get(args[0]))
-    return out
-'''
-
-
-def _sampler_cache(rng: random.Random) -> tuple[list[tuple[str, Any]], ...]:
-    """Sample a cache op script.
-
-    Capacity is fixed at 2 (see the template source). Two script shapes are
-    produced so the classifier can separate public from hidden cases:
+    Keys are ``capacity + 1`` distinct keys, so the discriminating shape can
+    force an eviction. Two script shapes are produced so the classifier can
+    separate public from hidden cases:
 
     - **all-puts-first**: every key is written before any read, so the LRU
       recency bug never changes the observed output (buggy == fixed) — a
@@ -299,135 +485,151 @@ def _sampler_cache(rng: random.Random) -> tuple[list[tuple[str, Any]], ...]:
       evicts a still-recent key that the fixed cache keeps (buggy != fixed) —
       a NoOp patch fails these (hidden negative control).
     """
-    keys = ["a", "b", "c"]
+    keys = [f"k{i}" for i in range(capacity + 1)]
     rng.shuffle(keys)
     ops: list[tuple[Any, ...]] = []
     if rng.random() < 0.5:
         # All writes first, then reads: recency bug is not observable.
         for k in keys:
             ops.append(("put", k, rng.randint(1, 99)))
-        ops.append(("get", keys[0]))
-        ops.append(("get", keys[1]))
-        ops.append(("get", keys[2]))
+        for k in keys:
+            ops.append(("get", k))
     else:
-        # Interleave a read before the evicting write: recency bug is exposed.
-        ops.append(("put", keys[0], rng.randint(1, 99)))
-        ops.append(("put", keys[1], rng.randint(1, 99)))
+        # Fill the cache, read the oldest key, then force one eviction:
+        # the buggy cache evicts the read key, the fixed one evicts a
+        # different key -> observed outputs differ.
+        for k in keys[:capacity]:
+            ops.append(("put", k, rng.randint(1, 99)))
         ops.append(("get", keys[0]))
-        ops.append(("put", keys[2], rng.randint(1, 99)))
+        ops.append(("put", keys[capacity], rng.randint(1, 99)))
         ops.append(("get", keys[0]))
         ops.append(("get", keys[1]))
-        ops.append(("get", keys[2]))
     return (ops,)
 
 
-def _cache() -> Template:
-    return Template(
-        name="cache",
+def _build_cache(rng: random.Random) -> SourceInstance:
+    capacity = 2 if rng.random() < 0.5 else 3
+    class_name = _pick(rng, "_Cache", "_Store")
+    data_name = _pick(rng, "_data", "_entries")
+    order_name = _pick(rng, "_order", "_recency")
+    put_name = _pick(rng, "put", "write")
+    get_name = _pick(rng, "get", "read")
+    buggy = _render_cache(
+        capacity, class_name, data_name, order_name, put_name, get_name, keep_bug=True
+    )
+    fixed = _render_cache(
+        capacity, class_name, data_name, order_name, put_name, get_name, keep_bug=False
+    )
+    task = (
+        "Fix the cache: a ``get`` must refresh recency (LRU). With "
+        f"capacity {capacity}, after inserting {capacity} keys and reading the "
+        "oldest, inserting one more must evict the least-recently-used key. "
+        "Hidden tests exercise eviction order."
+    )
+    return SourceInstance(
+        template="cache",
         task_kind="repair",
-        task="Fix the cache: a ``get`` must refresh recency (LRU). With "
-        "capacity 2, after inserting a,b and reading b, inserting c must "
-        "evict a (not b). Hidden tests exercise eviction order.",
-        buggy=_CACHE_BUGGY,
-        fixed=_CACHE_FIXED,
-        sampler=_sampler_cache,
+        task=task,
+        buggy=buggy,
+        fixed=fixed,
+        oracle=lambda ops: _oracle_cache(ops, capacity),
+        sampler=lambda rng: _sampler_cache(rng, capacity),
     )
 
 
 # ---------------------------------------------------------------------- state machine
 
-_STATE_BUGGY = '''"""A minimal state machine (tick resets the machine)."""
-from __future__ import annotations
+def _render_state(tokens: tuple[str, str, str], state_name: str, keep_bug: bool) -> str:
+    start, tick, finish = tokens
+    if keep_bug:
+        run_tick = f'            {state_name} = "IDLE"\n'
+    else:
+        run_tick = f'            {state_name} = "RUN"\n'
+    return (
+        '"""A minimal state machine (tick resets the machine)."""\n'
+        if keep_bug
+        else '"""A minimal state machine."""\n'
+    ) + (
+        "from __future__ import annotations\n"
+        "\n"
+        "\n"
+        "def solve(events: list[str]) -> str:\n"
+        f'    """Advance a machine; RUN must stay RUN on {tick!r}."""\n'
+        f"    {state_name} = \"IDLE\"\n"
+        "    for ev in events:\n"
+        f'        if {state_name} == "IDLE" and ev == {start!r}:\n'
+        f'            {state_name} = "RUN"\n'
+        f'        elif {state_name} == "RUN" and ev == {tick!r}:\n'
+        f"{run_tick}"
+        f'        elif {state_name} == "RUN" and ev == {finish!r}:\n'
+        f'            {state_name} = "DONE"\n'
+        f'        elif {state_name} == "DONE":\n'
+        f'            {state_name} = "DONE"\n'
+        f"    return {state_name}\n"
+    )
 
 
-def solve(events: list[str]) -> str:
-    """Advance a machine; RUN must stay RUN on tick (BUG: resets to IDLE)."""
-    state = "IDLE"
-    for ev in events:
-        if state == "IDLE" and ev == "start":
-            state = "RUN"
-        elif state == "RUN" and ev == "tick":
-            state = "IDLE"
-        elif state == "RUN" and ev == "finish":
-            state = "DONE"
-        elif state == "DONE":
-            state = "DONE"
-    return state
-'''
-
-_STATE_FIXED = '''"""A minimal state machine."""
-from __future__ import annotations
-
-
-def solve(events: list[str]) -> str:
-    """Advance a machine; RUN stays RUN on tick."""
-    state = "IDLE"
-    for ev in events:
-        if state == "IDLE" and ev == "start":
-            state = "RUN"
-        elif state == "RUN" and ev in ("tick", "finish"):
-            state = "RUN" if ev == "tick" else "DONE"
-        elif state == "DONE":
-            state = "DONE"
-    return state
-'''
-
-
-def _sampler_state(rng: random.Random) -> tuple[list[str], ...]:
-    """Sample a state-machine event script.
-
-    Capacity/fixed transition: ``start`` then ``finish`` reaches DONE. A
-    ``tick`` between them is the discriminating event:
-
-    - **no tick** (buggy == fixed): start, finish -> DONE (public hint).
-    - **tick before finish** (buggy != fixed): the buggy machine resets to
-      IDLE on the tick and never reaches DONE (hidden negative control).
-    """
-    events = ["start"]
+def _sampler_state(rng: random.Random, tokens: tuple[str, str, str]) -> tuple[list[str], ...]:
+    start, tick, finish = tokens
+    events = [start]
     if rng.random() < 0.5:
-        events.append("finish")
+        events.append(finish)
     else:
         for _ in range(rng.randint(1, 3)):
-            events.append("tick")
-        events.append("finish")
+            events.append(tick)
+        events.append(finish)
     return (events,)
 
 
-def _state_machine() -> Template:
-    return Template(
-        name="state_machine",
+def _build_state_machine(rng: random.Random) -> SourceInstance:
+    tokens = rng.choice((("start", "tick", "finish"), ("go", "advance", "end")))
+    state_name = _pick(rng, "state", "status")
+    buggy = _render_state(tokens, state_name, keep_bug=True)
+    fixed = _render_state(tokens, state_name, keep_bug=False)
+    start, tick, finish = tokens
+    task = (
+        f"Fix the state machine: a RUN state must stay RUN on a {tick!r} "
+        f"event. Hidden tests exercise {tick} loops between {start!r} and "
+        f"{finish!r}."
+    )
+    return SourceInstance(
+        template="state_machine",
         task_kind="repair",
-        task="Fix the state machine: a RUN state must stay RUN on a ``tick`` "
-        "event. Hidden tests exercise tick loops.",
-        buggy=_STATE_BUGGY,
-        fixed=_STATE_FIXED,
-        sampler=_sampler_state,
+        task=task,
+        buggy=buggy,
+        fixed=fixed,
+        oracle=lambda events: _oracle_state(events, tokens),
+        sampler=lambda rng: _sampler_state(rng, tokens),
     )
 
 
 # ---------------------------------------------------------------------- serialization
 
-_SER_BUGGY = '''"""Encode / decode a compact ``k=v,...`` line format."""
-from __future__ import annotations
-
-
-def solve(items: dict[str, int]) -> str:
-    """Encode an int dict as ``k=v,k=v`` (BUG: keys not sorted)."""
-    parts = []
-    for k, v in items.items():
-        parts.append(f"{k}={v}")
-    return ",".join(parts)
-'''
-
-_SER_FIXED = '''"""Encode / decode a compact ``k=v,...`` line format."""
-from __future__ import annotations
-
-
-def solve(items: dict[str, int]) -> str:
-    """Encode an int dict as ``k=v,k=v`` with keys sorted."""
-    parts = [f"{k}={v}" for k, v in sorted(items.items())]
-    return ",".join(parts)
-'''
+def _render_ser(
+    sep: str,
+    parts_name: str,
+    fmt: Callable[[str, str], str],
+    keep_bug: bool,
+) -> str:
+    expr = fmt("k", "v")
+    if keep_bug:
+        build = (
+            f"    {parts_name} = []\n"
+            f"    for k, v in items.items():\n"
+            f"        {parts_name}.append({expr})\n"
+        )
+    else:
+        build = f"    {parts_name} = [{expr} for k, v in sorted(items.items())]\n"
+    return (
+        '"""Encode / decode a compact ``k=v,...`` line format."""\n'
+        "from __future__ import annotations\n"
+        "\n"
+        "\n"
+        "def solve(items: dict[str, int]) -> str:\n"
+        '    """Encode an int dict as ``k=v,k=v`` with keys sorted."""\n'
+        f"{build}"
+        f"    return {sep!r}.join({parts_name})\n"
+    )
 
 
 def _sampler_ser(rng: random.Random) -> tuple[dict[str, int], ...]:
@@ -436,37 +638,65 @@ def _sampler_ser(rng: random.Random) -> tuple[dict[str, int], ...]:
     return ({k: rng.randint(-5, 5) for k in keys},)
 
 
-def _serialization() -> Template:
-    return Template(
-        name="serialization",
+def _build_serialization(rng: random.Random) -> SourceInstance:
+    sep = "," if rng.random() < 0.5 else ";"
+    parts_name = _pick(rng, "parts", "chunks")
+
+    def fmt_fstring(k: str, v: str) -> str:
+        return f"f'{{{k}}}={{{v}}}'"
+
+    def fmt_format(k: str, v: str) -> str:
+        return f"'{{}}={{}}'.format({k}, {v})"
+
+    fmt = fmt_fstring if rng.random() < 0.5 else fmt_format
+    buggy = _render_ser(sep, parts_name, fmt, keep_bug=True)
+    fixed = _render_ser(sep, parts_name, fmt, keep_bug=False)
+    task = (
+        f"Implement ``solve`` to encode a dict as ``k=v{sep}k=v`` with keys "
+        "sorted lexicographically. Hidden tests check sorted output."
+    )
+    return SourceInstance(
+        template="serialization",
         task_kind="implementation",
-        task="Implement ``solve`` to encode a dict as ``k=v,k=v`` with keys "
-        "sorted lexicographically. Hidden tests check sorted output.",
-        buggy=_SER_BUGGY,
-        fixed=_SER_FIXED,
+        task=task,
+        buggy=buggy,
+        fixed=fixed,
+        oracle=lambda items: _oracle_ser(items, sep),
         sampler=_sampler_ser,
     )
 
 
 # ---------------------------------------------------------------------- scheduler
 
-_SCHED_BUGGY = '''"""A priority task scheduler."""
-from __future__ import annotations
-
-
-def solve(tasks: list[tuple[str, int]]) -> list[str]:
-    """Return task ids in priority order (BUG: insertion order kept)."""
-    return [t for t, _ in tasks]
-'''
-
-_SCHED_FIXED = '''"""A priority task scheduler."""
-from __future__ import annotations
-
-
-def solve(tasks: list[tuple[str, int]]) -> list[str]:
-    """Return task ids in priority order (lower int = higher priority)."""
-    return [t for t, _ in sorted(tasks, key=lambda x: x[1])]
-'''
+def _render_sched(names: dict[str, str], key_fn: bool, keep_bug: bool) -> str:
+    if keep_bug:
+        body = f"    return [{names['task_id']} for {names['task_id']}, _ in {names['tasks']}]\n"
+    elif key_fn:
+        body = (
+            f"    return [{names['task_id']} for {names['task_id']}, _ in "
+            f"sorted({names['tasks']}, key={names['priority']})]\n"
+        )
+    else:
+        body = (
+            f"    return [{names['task_id']} for {names['task_id']}, {names['prio']} in "
+            f"sorted({names['tasks']}, key=lambda x: x[1])]\n"
+        )
+    key_src = (
+        f"\n\ndef {names['priority']}(pair: tuple[str, int]) -> int:\n"
+        f"    return pair[1]\n"
+        if key_fn
+        else ""
+    )
+    return (
+        '"""A priority task scheduler."""\n'
+        "from __future__ import annotations\n"
+        f"{key_src}"
+        "\n"
+        "\n"
+        f"def solve({names['tasks']}: list[tuple[str, int]]) -> list[str]:\n"
+        '    """Return task ids in priority order (lower int = higher priority)."""\n'
+        f"{body}"
+    )
 
 
 def _sampler_sched(rng: random.Random) -> tuple[list[tuple[str, int]], ...]:
@@ -475,114 +705,131 @@ def _sampler_sched(rng: random.Random) -> tuple[list[tuple[str, int]], ...]:
     return (tasks,)
 
 
-def _scheduler() -> Template:
-    return Template(
-        name="scheduler",
+def _build_scheduler(rng: random.Random) -> SourceInstance:
+    names = {
+        "task_id": _pick(rng, "t", "task"),
+        "tasks": _pick(rng, "tasks", "jobs"),
+        "prio": _pick(rng, "p", "prio"),
+        "priority": _pick(rng, "_priority", "_weight"),
+    }
+    key_fn = rng.random() < 0.5
+    buggy = _render_sched(names, key_fn, keep_bug=True)
+    fixed = _render_sched(names, key_fn, keep_bug=False)
+    task = (
+        "Implement ``solve`` to return task ids ordered by priority "
+        "(lower integer wins). Hidden tests check ordering."
+    )
+    return SourceInstance(
+        template="scheduler",
         task_kind="implementation",
-        task="Implement ``solve`` to return task ids ordered by priority "
-        "(lower integer wins). Hidden tests check ordering.",
-        buggy=_SCHED_BUGGY,
-        fixed=_SCHED_FIXED,
+        task=task,
+        buggy=buggy,
+        fixed=fixed,
+        oracle=_oracle_sched,
         sampler=_sampler_sched,
     )
 
 
 # ---------------------------------------------------------------------- storage
 
-_STORAGE_BUGGY = '''"""A tiny KV store with a single-level transaction."""
-from __future__ import annotations
+def _render_storage(tokens: tuple[str, ...], names: dict[str, str], keep_bug: bool) -> str:
+    begin, set_, commit, rollback, get_ = tokens
+    data, tx = names["data"], names["tx"]
+    if keep_bug:
+        commit_body = (
+            f"                {tx} = None  # BUG: writes are not persisted\n"
+        )
+    else:
+        commit_body = (
+            f"                {data} = dict({tx})\n"
+            f"                {tx} = None\n"
+        )
+    return (
+        '"""A tiny KV store with a single-level transaction."""\n'
+        "from __future__ import annotations\n"
+        "\n"
+        "\n"
+        "def solve(ops: list[tuple[str, Any]]) -> list[str | None]:\n"
+        '    """Run a KV op script; return ``get`` results."""\n'
+        f"    {data}: dict[str, str] = {{}}\n"
+        f"    {tx}: dict[str, str] | None = None\n"
+        "    out: list[str | None] = []\n"
+        "    for op, *args in ops:\n"
+        f"        if op == {begin!r}:\n"
+        f"            {tx} = dict({data})\n"
+        f"        elif op == {set_!r}:\n"
+        f"            if {tx} is not None:\n"
+        f"                {tx}[args[0]] = args[1]\n"
+        "            else:\n"
+        f"                {data}[args[0]] = args[1]\n"
+        f"        elif op == {commit!r}:\n"
+        f"            if {tx} is not None:\n"
+        f"{commit_body}"
+        f"        elif op == {rollback!r}:\n"
+        f"            {tx} = None\n"
+        f"        elif op == {get_!r}:\n"
+        f"            src = {tx} if {tx} is not None else {data}\n"
+        "            out.append(src.get(args[0]))\n"
+        "    return out\n"
+    )
 
 
-def solve(ops: list[tuple[str, Any]]) -> list[str | None]:
-    """Run a KV op script; return ``get`` results. (BUG: commit drops writes.)"""
-    data: dict[str, str] = {}
-    tx: dict[str, str] | None = None
-    out: list[str | None] = []
-    for op, *args in ops:
-        if op == "begin":
-            tx = dict(data)
-        elif op == "set":
-            if tx is not None:
-                tx[args[0]] = args[1]
-            else:
-                data[args[0]] = args[1]
-        elif op == "commit":
-            if tx is not None:
-                tx = None  # BUG: writes are not persisted
-        elif op == "rollback":
-            tx = None
-        elif op == "get":
-            src = tx if tx is not None else data
-            out.append(src.get(args[0]))
-    return out
-'''
-
-_STORAGE_FIXED = '''"""A tiny KV store with a single-level transaction."""
-from __future__ import annotations
-
-
-def solve(ops: list[tuple[str, Any]]) -> list[str | None]:
-    """Run a KV op script; return ``get`` results."""
-    data: dict[str, str] = {}
-    tx: dict[str, str] | None = None
-    out: list[str | None] = []
-    for op, *args in ops:
-        if op == "begin":
-            tx = dict(data)
-        elif op == "set":
-            if tx is not None:
-                tx[args[0]] = args[1]
-            else:
-                data[args[0]] = args[1]
-        elif op == "commit":
-            if tx is not None:
-                data = dict(tx)
-                tx = None
-        elif op == "rollback":
-            tx = None
-        elif op == "get":
-            src = tx if tx is not None else data
-            out.append(src.get(args[0]))
-    return out
-'''
-
-
-def _sampler_storage(rng: random.Random) -> tuple[list[tuple[str, Any]], ...]:
+def _sampler_storage(
+    rng: random.Random, tokens: tuple[str, ...]
+) -> tuple[list[tuple[str, Any]], ...]:
+    begin, set_, commit, rollback, get_ = tokens
     keys = ["k", "a", "b", "c"]
     ops: list[tuple[Any, ...]] = []
-    ops.append(("begin",))
+    ops.append((begin,))
     for _ in range(rng.randint(1, 3)):
-        ops.append(("set", rng.choice(keys), rng.choice(["v", "x", "y"])))
+        ops.append((set_, rng.choice(keys), rng.choice(["v", "x", "y"])))
     if rng.random() < 0.5:
-        ops.append(("commit",))
+        ops.append((commit,))
     else:
-        ops.append(("rollback",))
-    ops.append(("get", rng.choice(keys)))
+        ops.append((rollback,))
+    ops.append((get_, rng.choice(keys)))
     return (ops,)
 
 
-def _storage() -> Template:
-    return Template(
-        name="storage",
+def _build_storage(rng: random.Random) -> SourceInstance:
+    tokens = rng.choice(
+        (
+            ("begin", "set", "commit", "rollback", "get"),
+            ("open", "write", "commit", "abort", "read"),
+        )
+    )
+    names = {
+        "data": _pick(rng, "data", "store"),
+        "tx": _pick(rng, "tx", "pending"),
+    }
+    buggy = _render_storage(tokens, names, keep_bug=True)
+    fixed = _render_storage(tokens, names, keep_bug=False)
+    begin, set_, commit, rollback, get_ = tokens
+    task = (
+        f"Fix the KV store: {commit!r} must persist open-transaction writes "
+        f"into the store; {rollback!r} must discard them. Hidden tests check "
+        f"commit persistence."
+    )
+    return SourceInstance(
+        template="storage",
         task_kind="repair",
-        task="Fix the KV store: ``commit`` must persist open-transaction writes "
-        "into the store; ``rollback`` must discard them. Hidden tests check "
-        "commit persistence.",
-        buggy=_STORAGE_BUGGY,
-        fixed=_STORAGE_FIXED,
-        sampler=_sampler_storage,
+        task=task,
+        buggy=buggy,
+        fixed=fixed,
+        oracle=lambda ops: _oracle_storage(ops, tokens),
+        sampler=lambda rng: _sampler_storage(rng, tokens),
     )
 
 
 TEMPLATES: dict[str, Template] = {
     t.name: t
     for t in (
-        _parser(),
-        _cache(),
-        _state_machine(),
-        _serialization(),
-        _scheduler(),
-        _storage(),
+        Template(name="parser", task_kind="repair", builder=_build_parser),
+        Template(name="cache", task_kind="repair", builder=_build_cache),
+        Template(name="state_machine", task_kind="repair", builder=_build_state_machine),
+        Template(name="serialization", task_kind="implementation", builder=_build_serialization),
+        Template(name="scheduler", task_kind="implementation", builder=_build_scheduler),
+        Template(name="storage", task_kind="repair", builder=_build_storage),
     )
 }
 
@@ -595,29 +842,30 @@ def template_for(seed: str) -> Template:
     return TEMPLATES[rng.choice(TEMPLATE_NAMES)]
 
 
-def classify_cases(
-    template: Template,
-    rng: random.Random,
-    *,
-    public_count: int | None = None,
-    hidden_count: int | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Classify sampled inputs into public (buggy==fixed) / hidden (buggy!=fixed)."""
-    return _classify(
-        template,
-        template.sampler,
-        rng,
-        public_count or template.public_count,
-        hidden_count or template.hidden_count,
-    )
+def build_source_instance(template: Template, instance_rng: random.Random) -> SourceInstance:
+    """Assemble one concrete source instance from an instance RNG.
+
+    The generator supplies a verifier-secret-bound ``instance_rng``; without
+    the secret, a released challenge's fixed source / reference patch cannot
+    be reproduced (docs/SPEC.md "Verifier material"). This is the ONLY path
+    that produces the reference implementation.
+    """
+    return template.builder(instance_rng)
+
+
+def run_source(src: str, args: tuple[Any, ...]) -> Any:
+    """Execute a source string in an isolated namespace and call ``solve``."""
+    return _run_source(src, args)
 
 
 __all__ = [
+    "SourceInstance",
     "TEMPLATES",
     "TEMPLATE_NAMES",
     "Template",
-    "classify_cases",
+    "build_source_instance",
     "classify_hidden",
     "classify_public",
+    "run_source",
     "template_for",
 ]

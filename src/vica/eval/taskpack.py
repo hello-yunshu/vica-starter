@@ -5,7 +5,9 @@ the concrete tasks (their challenge ids, and for REPO their workspace hashes)
 that an evaluation runs. It is what makes a benchmark result reproducible and
 comparable across systems and runs:
 
-- ``task_pack_id``      — stable logical family name (e.g. ``repo-v0.1-core``).
+- ``task_pack_id``      — stable logical family name (e.g. ``repo-v0.1-generated``
+  for a dynamic REPO evaluation; only a truly frozen official core pack may use
+  ``repo-v0.1-core``).
 - ``task_pack_version`` — bumped whenever the task *semantics* change; a
   released task pack is never silently mutated.
 - ``task_pack_hash``    — SHA-256 of the canonical serialization of the task
@@ -24,16 +26,31 @@ from typing import Any
 
 from vica.protocol.serialization import stable_hash
 
-# Stable logical name for the frozen REPO-v0.1 benchmark instance set. Other
-# families keep their own ``<type>-core`` id; the id is a research label, not
-# a version.
+# v1.0.2 (semantic-oracle verifier): the REPO generator semantics changed again
+# (0.2.0 -> 0.3.0, expected values now from an independent oracle instead of a
+# recoverable fixed source). A dynamic REPO evaluation is therefore labelled
+# ``repo-v0.1-generated`` (not ``core``) — only a truly frozen official core
+# pack may claim ``repo-v0.1-core``, and none is established in this round.
+# The ``<type>-core`` id is reserved for an actually frozen core; other
+# families keep their own baseline id.
 TASK_PACK_ID_BY_TYPE: dict[str, str] = {
-    "repo-v0.1": "repo-v0.1-core",
+    "repo-v0.1": "repo-v0.1-generated",
 }
 DEFAULT_TASK_PACK_ID = "benchmark-core"
-# Maturity of the Task Pack format itself. Bump only on a breaking change to
-# the task-set identity definition (not on a new task set).
-TASK_PACK_VERSION = "1"
+# Maturity of the Task Pack format, scoped per challenge family. Bump only on a
+# breaking change to a family's task-set identity definition (not on a new task
+# set). v1 -> v2 for REPO: the 0.1.0 -> 0.2.0 generator / verifier semantics
+# changed. v2 -> v3: the 0.2.0 -> 0.3.0 semantic-oracle change alters the
+# authoritative expected-value derivation, so a candidate's validity may
+# differ; packs and results built under the old semantics must not be silently
+# re-identified under the new ones. Other families keep the default version.
+# ``TASK_PACK_VERSION`` is retained as the REPO-family pack version constant
+# (used by tests and the family map).
+TASK_PACK_VERSION_BY_TYPE: dict[str, str] = {
+    "repo-v0.1": "3",
+}
+DEFAULT_TASK_PACK_VERSION = "1"
+TASK_PACK_VERSION = "3"
 
 
 @dataclass(frozen=True)
@@ -110,6 +127,16 @@ def task_pack_id_for(challenge_type: str) -> str:
     return TASK_PACK_ID_BY_TYPE.get(challenge_type, DEFAULT_TASK_PACK_ID)
 
 
+def task_pack_version_for(challenge_type: str) -> str:
+    """The Task Pack version for a challenge family (family-scoped).
+
+    Only families whose generator / verifier semantics actually changed bump
+    their pack version; all others keep the default. This prevents a global
+    version bump from silently re-identifying unrelated families.
+    """
+    return TASK_PACK_VERSION_BY_TYPE.get(challenge_type, DEFAULT_TASK_PACK_VERSION)
+
+
 def derive_task_pack(
     public_manifest: dict[str, Any], challenges: list[dict[str, Any]]
 ) -> TaskPack:
@@ -119,7 +146,7 @@ def derive_task_pack(
     ordered = sorted(challenges, key=lambda c: str(c.get("id", "")))
     return TaskPack(
         task_pack_id=task_pack_id_for(challenge_type),
-        task_pack_version=TASK_PACK_VERSION,
+        task_pack_version=task_pack_version_for(challenge_type),
         challenge_type=challenge_type,
         generator_version=str(public_manifest.get("generator_version", "")),
         seed=int(public_manifest.get("seed", 0)),
@@ -133,9 +160,12 @@ def derive_task_pack(
 
 __all__ = [
     "DEFAULT_TASK_PACK_ID",
+    "DEFAULT_TASK_PACK_VERSION",
     "TASK_PACK_VERSION",
+    "TASK_PACK_VERSION_BY_TYPE",
     "TaskPack",
     "derive_task_pack",
     "task_pack_hash",
     "task_pack_id_for",
+    "task_pack_version_for",
 ]
