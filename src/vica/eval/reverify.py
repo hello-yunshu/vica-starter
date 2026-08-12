@@ -131,18 +131,24 @@ def reverify_bundle(
     # Strict mode: bind the Task Pack identity (§50 / §59). The stored result
     # must cover exactly the same benchmark instance set as the evaluation
     # being used; a task_pack_hash mismatch means the tasks changed or the
-    # stored result is from a different task set.
+    # stored result is from a different task set. The version is bound too so a
+    # semantic re-labelling of a family's pack is detected even when the hash
+    # and id happen to coincide.
     task_pack = derive_task_pack(pub, load_public_challenges(evaluation))
-    stored_task_hash = manifest.get("task_pack_hash")
-    stored_task_id = manifest.get("task_pack_id")
+    stored_task_hash = _norm(manifest.get("task_pack_hash"))
+    stored_task_id = _norm(manifest.get("task_pack_id"))
+    stored_task_version = _norm(manifest.get("task_pack_version"))
     if (
         stored_task_hash != task_pack.task_pack_hash
         or stored_task_id != task_pack.task_pack_id
+        or stored_task_version != task_pack.task_pack_version
     ):
         raise EvaluationFailure(
             "strict reverify refused: task pack mismatch between evaluation and result "
-            f"bundle (evaluation {task_pack.task_pack_id}@{task_pack.task_pack_hash[:12]} "
-            f"!= stored {stored_task_id}@{(_norm(stored_task_hash) or 'none')[:12] or 'none'})"
+            f"bundle (evaluation {task_pack.task_pack_id}@v{task_pack.task_pack_version}"
+            f"@{task_pack.task_pack_hash[:12]} != stored "
+            f"{stored_task_id or 'none'}@v{stored_task_version or 'none'}"
+            f"@{(stored_task_hash or 'none')[:12] or 'none'})"
         )
 
     # Strict mode: the evaluation used for reverify must carry the same

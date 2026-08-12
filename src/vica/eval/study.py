@@ -23,6 +23,7 @@ the best attempt (§75).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -256,13 +257,24 @@ def _summarize_systems(
 
 
 def _safe_component(name: str) -> str:
-    """Sanitize a system_id into a single safe path component.
+    """Validate a system_id into a single safe, unambiguous path component.
 
-    The system_id is emitted into the on-disk run path, so we restrict it to
-    ``[A-Za-z0-9._-]`` to avoid path traversal or odd filenames.
+    The system_id is a benchmark provenance identity and is emitted into the
+    on-disk run path, so we REJECT (never silently normalize) anything that is
+    not a single ``[A-Za-z0-9._-]`` component. A lossy sanitizer would collapse
+    distinct identities (e.g. ``ab`` and ``a/b``) onto the same path and could
+    allow ``.`` / ``..``; instead we raise ``ValueError`` so a collision is
+    impossible and traversal is impossible.
     """
-    cleaned = "".join(ch for ch in name if ch.isalnum() or ch in "._-")
-    return cleaned or "system"
+    if not isinstance(name, str) or not _SYSTEM_ID_RE.match(name):
+        raise ValueError(
+            f"invalid system_id {name!r}: must match "
+            r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ and be a single path component"
+        )
+    return name
+
+
+_SYSTEM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _accumulate_metrics(bucket: dict[str, Any], run: ReplicateResult) -> None:

@@ -36,11 +36,17 @@ TASK_PACK_ID_BY_TYPE: dict[str, str] = {
     "repo-v0.1": "repo-v0.1-generated",
 }
 DEFAULT_TASK_PACK_ID = "benchmark-core"
-# Maturity of the Task Pack format itself. Bump only on a breaking change to
-# the task-set identity definition (not on a new task set). v1 -> v2: the
-# REPO generator / verifier semantics changed, so a candidate's validity may
-# differ; packs and results built under the old semantics must not be silently
-# re-identified under the new ones.
+# Maturity of the Task Pack format, scoped per challenge family. Bump only on a
+# breaking change to a family's task-set identity definition (not on a new task
+# set). v1 -> v2 for REPO: the 0.1.0 -> 0.2.0 generator / verifier semantics
+# changed, so a candidate's validity may differ; packs and results built under
+# the old semantics must not be silently re-identified under the new ones.
+# Other families keep the default version. ``TASK_PACK_VERSION`` is retained as
+# the REPO-family pack version constant (used by tests and the family map).
+TASK_PACK_VERSION_BY_TYPE: dict[str, str] = {
+    "repo-v0.1": "2",
+}
+DEFAULT_TASK_PACK_VERSION = "1"
 TASK_PACK_VERSION = "2"
 
 
@@ -118,6 +124,16 @@ def task_pack_id_for(challenge_type: str) -> str:
     return TASK_PACK_ID_BY_TYPE.get(challenge_type, DEFAULT_TASK_PACK_ID)
 
 
+def task_pack_version_for(challenge_type: str) -> str:
+    """The Task Pack version for a challenge family (family-scoped).
+
+    Only families whose generator / verifier semantics actually changed bump
+    their pack version; all others keep the default. This prevents a global
+    version bump from silently re-identifying unrelated families.
+    """
+    return TASK_PACK_VERSION_BY_TYPE.get(challenge_type, DEFAULT_TASK_PACK_VERSION)
+
+
 def derive_task_pack(
     public_manifest: dict[str, Any], challenges: list[dict[str, Any]]
 ) -> TaskPack:
@@ -127,7 +143,7 @@ def derive_task_pack(
     ordered = sorted(challenges, key=lambda c: str(c.get("id", "")))
     return TaskPack(
         task_pack_id=task_pack_id_for(challenge_type),
-        task_pack_version=TASK_PACK_VERSION,
+        task_pack_version=task_pack_version_for(challenge_type),
         challenge_type=challenge_type,
         generator_version=str(public_manifest.get("generator_version", "")),
         seed=int(public_manifest.get("seed", 0)),
@@ -141,9 +157,12 @@ def derive_task_pack(
 
 __all__ = [
     "DEFAULT_TASK_PACK_ID",
+    "DEFAULT_TASK_PACK_VERSION",
     "TASK_PACK_VERSION",
+    "TASK_PACK_VERSION_BY_TYPE",
     "TaskPack",
     "derive_task_pack",
     "task_pack_hash",
     "task_pack_id_for",
+    "task_pack_version_for",
 ]
