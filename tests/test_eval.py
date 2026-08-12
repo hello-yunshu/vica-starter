@@ -675,6 +675,90 @@ def test_unsupported_evaluation_bundle_format_rejected(eval_csp: Path) -> None:
         load_public_manifest(eval_csp)
 
 
+def test_eval_v2_rejects_submission_v1_pairing(tmp_path: Path) -> None:
+    """§33: a REPO v2 evaluation must not accept a v1 Submission Bundle."""
+    from vica.eval.dispatch import SUBMISSION_BUNDLE_VERSION
+    from vica.repo.generator import TYPE_NAME as REPO_TYPE
+
+    eval_dir = tmp_path / "eval"
+    prepare_evaluation(
+        challenge_type=REPO_TYPE,
+        difficulties=[1],
+        instances=1,
+        seed=7,
+        out=eval_dir,
+        verifier_secret=_SECRET_A,
+    )
+    challenges = load_public_challenges(eval_dir)
+    rows = [
+        {"challenge_id": ch["id"], "candidate": {"patch": ""}, "metadata": {}}
+        for ch in challenges
+    ]
+    sub = tmp_path / "sub"
+    build_submission_bundle(
+        evaluation=eval_dir, system_id="x", rows=rows, out=sub
+    )
+    manifest = json.loads((sub / "manifest.json").read_text())
+    assert manifest["submission_bundle_version"] != SUBMISSION_BUNDLE_VERSION
+    manifest["submission_bundle_version"] = SUBMISSION_BUNDLE_VERSION
+    (sub / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(EvaluationFailure, match="does not pair"):
+        verify_evaluation(evaluation=eval_dir, submission=sub, out=tmp_path / "res")
+
+
+def test_eval_v1_rejects_submission_v2_pairing(eval_synth: Path, tmp_path: Path) -> None:
+    """§33: a v1 (non-workspace) evaluation must not accept a v2 Submission."""
+    from vica.eval.dispatch import SUBMISSION_BUNDLE_VERSION_V2
+
+    rows = _rows_for(eval_synth)
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_synth, system_id="x", rows=rows, out=sub)
+    manifest = json.loads((sub / "manifest.json").read_text())
+    manifest["submission_bundle_version"] = SUBMISSION_BUNDLE_VERSION_V2
+    (sub / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(EvaluationFailure, match="does not pair"):
+        verify_evaluation(evaluation=eval_synth, submission=sub, out=tmp_path / "res")
+
+
+def test_strict_reverify_rejects_result_version_pairing(tmp_path: Path) -> None:
+    """§34: a Result Bundle whose version does not pair with the evaluation's
+    is refused by strict reverify."""
+    from vica.eval.dispatch import RESULT_BUNDLE_VERSION
+    from vica.repo.generator import TYPE_NAME as REPO_TYPE
+
+    eval_dir = tmp_path / "eval"
+    prepare_evaluation(
+        challenge_type=REPO_TYPE,
+        difficulties=[1],
+        instances=1,
+        seed=8,
+        out=eval_dir,
+        verifier_secret=_SECRET_A,
+    )
+    challenges = load_public_challenges(eval_dir)
+    rows = [
+        {"challenge_id": ch["id"], "candidate": {"patch": ""}, "metadata": {}}
+        for ch in challenges
+    ]
+    sub = tmp_path / "sub"
+    build_submission_bundle(evaluation=eval_dir, system_id="x", rows=rows, out=sub)
+    res = tmp_path / "res"
+    verify_evaluation(evaluation=eval_dir, submission=sub, out=res)
+    manifest = json.loads((res / "manifest.json").read_text())
+    assert manifest["result_bundle_version"] != RESULT_BUNDLE_VERSION
+    manifest["result_bundle_version"] = RESULT_BUNDLE_VERSION
+    # Recomputed the bundle hash so the *pairing* check (not the hash check)
+    # is what rejects the mismatched version.
+    from vica.protocol.serialization import stable_hash
+
+    manifest["bundle_hash"] = stable_hash(
+        {k: v for k, v in manifest.items() if k != "bundle_hash"}
+    )
+    (res / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(EvaluationFailure, match="does not pair"):
+        reverify_bundle(res, eval_dir, system_id="x")
+
+
 def test_unsupported_generator_version_rejected() -> None:
     from vica.eval.bundle import validate_generator_version
 
@@ -770,7 +854,7 @@ def test_package_version_matches_pyproject() -> None:
 
     with open("pyproject.toml", "rb") as fh:
         pyproject = tomllib.load(fh)
-    assert vica.__version__ == pyproject["project"]["version"] == "1.0.0"
+    assert vica.__version__ == pyproject["project"]["version"] == "1.0.1"
 
 
 # ========================================== v0.2 final freeze regression tests

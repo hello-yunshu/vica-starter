@@ -28,7 +28,9 @@ from vica.eval.bundle import (
     load_verifier_material,
     validate_generator_version,
     validate_verifier_material,
+    withdrawn_generator_version,
 )
+from vica.eval.dispatch import expected_bundle_versions
 from vica.eval.metrics import summarize
 from vica.eval.models import EvaluationFailure, ReportStatus, ResultRecord, to_result_record
 from vica.eval.taskpack import derive_task_pack
@@ -80,6 +82,19 @@ def reverify_bundle(
             "result bundle evaluation_id does not match the evaluation bundle"
         )
 
+    # Strict bundle-version pairing (§34): the Result version must match the
+    # Evaluation version it is verified against. Evaluation v1 only pairs with
+    # Result v1 and Evaluation v2 only with Result v2; a cross-version strict
+    # reverify is refused.
+    _, expected_result = expected_bundle_versions(pub.get("bundle_format_version"))
+    if manifest.get("result_bundle_version") != expected_result:
+        raise EvaluationFailure(
+            f"strict reverify refused: result bundle version "
+            f"{manifest.get('result_bundle_version')!r} does not pair with evaluation "
+            f"bundle version {pub.get('bundle_format_version')!r}; expected result "
+            f"version {expected_result!r}"
+        )
+
     # The result manifest records the commitment directly; cross-check it
     # against the stored evaluation copy and the current evaluation.
     stored_eval = _read_json(root / "evaluation.json", root)
@@ -101,6 +116,17 @@ def reverify_bundle(
             f"!= result bundle {stored_gen!r}"
         )
     validate_generator_version(pub, str(pub.get("challenge_type")), stored_gen)
+
+    # Withdrawn historical generators (REPO-v0.1 0.1.0) load for inspection
+    # but are refused for strict reverify: their verifier semantics are not
+    # re-runnable and must never be silently reinterpreted.
+    withdrawn = withdrawn_generator_version(str(pub.get("challenge_type")), stored_gen)
+    if withdrawn is not None:
+        raise EvaluationFailure(
+            f"strict reverify refused: withdrawn historical generator {withdrawn!r} for "
+            f"{pub.get('challenge_type')!r} — v1.0.1 marks REPO generator 0.1.0 "
+            "withdrawn (expected-value verifier leak); no authoritative reverify"
+        )
 
     # Strict mode: bind the Task Pack identity (§50 / §59). The stored result
     # must cover exactly the same benchmark instance set as the evaluation

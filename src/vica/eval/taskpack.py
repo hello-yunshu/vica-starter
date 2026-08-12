@@ -5,7 +5,9 @@ the concrete tasks (their challenge ids, and for REPO their workspace hashes)
 that an evaluation runs. It is what makes a benchmark result reproducible and
 comparable across systems and runs:
 
-- ``task_pack_id``      — stable logical family name (e.g. ``repo-v0.1-core``).
+- ``task_pack_id``      — stable logical family name (e.g. ``repo-v0.1-generated``
+  for a dynamic REPO evaluation; only a truly frozen official core pack may use
+  ``repo-v0.1-core``).
 - ``task_pack_version`` — bumped whenever the task *semantics* change; a
   released task pack is never silently mutated.
 - ``task_pack_hash``    — SHA-256 of the canonical serialization of the task
@@ -24,16 +26,22 @@ from typing import Any
 
 from vica.protocol.serialization import stable_hash
 
-# Stable logical name for the frozen REPO-v0.1 benchmark instance set. Other
-# families keep their own ``<type>-core`` id; the id is a research label, not
-# a version.
+# v1.0.1 (research-integrity hotfix): the REPO generator semantics changed
+# (0.1.0 -> 0.2.0, expected-value process isolation). A dynamic REPO evaluation
+# is therefore labelled ``repo-v0.1-generated`` (not ``core``) — only a truly
+# frozen official core pack may claim ``repo-v0.1-core``, and none is
+# established in this round. The ``<type>-core`` id is reserved for an actually
+# frozen core; other families keep their own baseline id.
 TASK_PACK_ID_BY_TYPE: dict[str, str] = {
-    "repo-v0.1": "repo-v0.1-core",
+    "repo-v0.1": "repo-v0.1-generated",
 }
 DEFAULT_TASK_PACK_ID = "benchmark-core"
 # Maturity of the Task Pack format itself. Bump only on a breaking change to
-# the task-set identity definition (not on a new task set).
-TASK_PACK_VERSION = "1"
+# the task-set identity definition (not on a new task set). v1 -> v2: the
+# REPO generator / verifier semantics changed, so a candidate's validity may
+# differ; packs and results built under the old semantics must not be silently
+# re-identified under the new ones.
+TASK_PACK_VERSION = "2"
 
 
 @dataclass(frozen=True)

@@ -33,6 +33,7 @@ from vica.eval.bundle import (
     load_verifier_material,
     validate_generator_version,
     validate_verifier_material,
+    withdrawn_generator_version,
 )
 from vica.eval.dispatch import check_result_version, is_v2
 from vica.eval.environment import environment_manifest, execution_profile, git_commit
@@ -121,6 +122,16 @@ def verify_evaluation(
     generator_version = public_manifest.get("generator_version")
     validate_generator_version(public_manifest, str(challenge_type), generator_version)
     _check_challenge_rows(challenges, challenge_type, generator_version)
+
+    # Withdrawn historical generators (REPO-v0.1 0.1.0) load for inspection
+    # but are refused for authoritative verification: their verifier
+    # semantics are not re-runnable and must never be silently reinterpreted.
+    if withdrawn_generator_version(str(challenge_type), generator_version) is not None:
+        raise EvaluationFailure(
+            f"withdrawn historical generator {generator_version!r} for "
+            f"{challenge_type!r}: no authoritative verification, see "
+            "historical-generator policy (v1.0.1 hotfix)"
+        )
 
     sub_manifest, rows = load_submission_bundle(
         submission, evaluation, trusted_runner_telemetry=trusted_runner_telemetry

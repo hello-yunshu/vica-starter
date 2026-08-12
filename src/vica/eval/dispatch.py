@@ -59,6 +59,25 @@ def is_v2(version: str) -> bool:
     return version == BUNDLE_FORMAT_VERSION_V2
 
 
+# Evaluation / Submission / Result bundle versions are strictly paired:
+# Evaluation v1 ↔ Submission v1 ↔ Result v1 and Evaluation v2 ↔ Submission v2
+# ↔ Result v2. A bundle is never matched to a different version than the
+# evaluation it was produced from (§32-34).
+def expected_bundle_versions(evaluation_version: object) -> tuple[str, str]:
+    """The Submission and Result bundle versions required for an Evaluation.
+
+    Raises ``EvaluationFailure`` for an unknown evaluation version.
+    """
+    if evaluation_version == BUNDLE_FORMAT_VERSION:
+        return SUBMISSION_BUNDLE_VERSION, RESULT_BUNDLE_VERSION
+    if evaluation_version == BUNDLE_FORMAT_VERSION_V2:
+        return SUBMISSION_BUNDLE_VERSION_V2, RESULT_BUNDLE_VERSION_V2
+    raise EvaluationFailure(
+        f"unsupported evaluation bundle version {evaluation_version!r}; "
+        f"supported: {sorted(SUPPORTED_EVALUATION_VERSIONS)}"
+    )
+
+
 __all__ = [
     "SUPPORTED_EVALUATION_VERSIONS",
     "SUPPORTED_RESULT_VERSIONS",
