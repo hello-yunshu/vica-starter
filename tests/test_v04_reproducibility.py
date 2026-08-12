@@ -219,6 +219,31 @@ def test_study_replicate_paths_are_portable(repo_eval: Path, tmp_path: Path) -> 
             assert rel == f"runs/{sid}/r0/result"
 
 
+def test_study_rejects_ambiguous_system_id(repo_eval: Path, tmp_path: Path) -> None:
+    """system_id is a provenance identity: ambiguous/colliding/unsafe ids are
+    rejected (ValueError), never lossily normalized onto a shared path."""
+    from vica.eval.study import _safe_component
+
+    # Lossy-cleaner collisions ("a/b" -> "ab") and "." / ".." are rejected.
+    for bad in ("a/b", ".", "..", "a b", "../x", "sys/../x", ""):
+        with pytest.raises(ValueError):
+            _safe_component(bad)
+
+    # Distinct valid ids map to distinct components (no collision).
+    assert _safe_component("ab") != _safe_component("a-b")
+    assert _safe_component("sys.1") == "sys.1"
+
+    # run_study propagates the rejection before doing any work.
+    with pytest.raises(ValueError):
+        run_study(
+            evaluation=repo_eval,
+            systems=[StudySystem(system_id="a/b", kind="noop")],
+            replicates=1,
+            out=tmp_path / "s",
+            verifier_secret=_SECRET,
+        )
+
+
 def test_study_layered_metrics_populated(repo_eval: Path, tmp_path: Path) -> None:
     """§26-27: Study summary populates by_difficulty, by_task_kind and by_template
     from the Result records — real accumulation, not empty objects."""
@@ -376,6 +401,58 @@ def test_reverify_detects_tampered_task_pack(repo_eval: Path, tmp_path: Path) ->
     manifest["bundle_hash"] = None  # recompute below
     from vica.protocol.serialization import stable_hash
 
+    stripped = {k: v for k, v in manifest.items() if k != "bundle_hash"}
+    manifest["bundle_hash"] = stable_hash(stripped)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(EvaluationFailure):
+        reverify_bundle(res, repo_eval, system_id="reference")
+
+
+def test_task_pack_version_is_family_scoped() -> None:
+    """Task Pack version is family-scoped: only REPO (whose generator/verifier
+    semantics changed) bumps to v2; CSP/SYNTH/OPT keep the default v1. A global
+    version bump must not silently re-identify unrelated families."""
+    from vica.eval.taskpack import (
+        DEFAULT_TASK_PACK_VERSION,
+        task_pack_version_for,
+    )
+
+    assert DEFAULT_TASK_PACK_VERSION == "1"
+    assert task_pack_version_for("repo-v0.1") == TASK_PACK_VERSION == "2"
+    assert task_pack_version_for("csp-v0.1") == "1"
+    assert task_pack_version_for("synth-v0.1") == "1"
+    assert task_pack_version_for("opt-v0.1") == "1"
+
+
+def test_reverify_rejects_task_pack_version_tamper(repo_eval: Path, tmp_path: Path) -> None:
+    """Strict reverify binds task_pack_version at the semantic layer.
+
+    After recomputing the Result manifest's own bundle_hash, a tampered
+    ``task_pack_version`` must still be refused — proving the failure comes
+    from the version binding, not from an invalid manifest hash.
+    """
+    from vica.protocol.serialization import stable_hash
+
+    sub = tmp_path / "ref-sub"
+    run_reference(
+        evaluation=repo_eval,
+        out=sub,
+        system_id="reference",
+        verifier_secret=_SECRET,
+    )
+    res = tmp_path / "result"
+    verify_evaluation(
+        evaluation=repo_eval,
+        submission=sub,
+        out=res,
+        system_id="reference",
+        trusted_runner_telemetry=True,
+    )
+    manifest_path = res / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["task_pack_version"] = "999"
+    manifest["bundle_hash"] = None
     stripped = {k: v for k, v in manifest.items() if k != "bundle_hash"}
     manifest["bundle_hash"] = stable_hash(stripped)
     manifest_path.write_text(json.dumps(manifest))
